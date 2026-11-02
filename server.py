@@ -28,6 +28,7 @@ import argparse
 import json
 import mimetypes
 import queue
+import sys
 import threading
 import time
 import traceback
@@ -43,6 +44,11 @@ ROOT = Path(__file__).parent
 WEB = ROOT / "web"
 RUNS = ROOT / "runs"
 RECENT_LIMIT = 20
+
+# The browser closed the connection before we answered: it reloaded, switched
+# runs, or a poll was superseded while a slow `baml query` ran. Harmless.
+# (Windows reports this as WinError 10053, ConnectionAbortedError.)
+CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 
 class RunCancelled(Exception):
@@ -195,9 +201,14 @@ class Handler(BaseHTTPRequestHandler):
     def guard(self, fn) -> None:
         try:
             fn()
+        except CLIENT_GONE:
+            pass  # the browser moved on mid-request; nobody to answer
         except Exception as e:
             traceback.print_exc()
-            self.send_json({"error": f"{type(e).__name__}: {e}"}, 500)
+            try:
+                self.send_json({"error": f"{type(e).__name__}: {e}"}, 500)
+            except CLIENT_GONE:
+                pass
 
     # ---- routes ----
 
@@ -261,6 +272,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "not found"}, 404)
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        # Disconnects while streaming static files/JSON aren't errors.
+        if isinstance(sys.exc_info()[1], CLIENT_GONE):
+            return
+        super().handle_error(request, client_address)
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="127.0.0.1")
@@ -271,7 +292,7 @@ def main() -> None:
     DEFAULT_MODEL.update(agent.model_kwargs(a))
     RUNS.mkdir(exist_ok=True)
     print(f"sinai: http://{a.host}:{a.port}  (default model: {DEFAULT_MODEL})")
-    ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
+    Server((a.host, a.port), Handler).serve_forever()
 
 
 if __name__ == "__main__":

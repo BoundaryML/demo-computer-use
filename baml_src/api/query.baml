@@ -45,19 +45,43 @@ function query_source() -> QuerySource {
     }
 }
 
+// Boundary cloud answers a burst of queries with HTTP 503 BUSY; that's
+// transient, so back off and retry (0.5s, 1s, 2s) before giving up.
+const QUERY_ATTEMPTS = 4;
+const QUERY_BACKOFF_MS = 500;
+
+function is_busy(stderr: string) -> bool {
+    stderr.includes("BUSY") || stderr.includes("HTTP 503")
+}
+
+function run_query(sql: string) -> baml.sys.ShellOutput throws QueryFailed | baml.errors.Io | baml.errors.Timeout {
+    let src = query_source();
+    let attempt = 1;
+    let delay = QUERY_BACKOFF_MS;
+    while (true) {
+        let out = baml.sys.exec(
+            "baml",
+            ["query", "--format", "json", "--max-wall", QUERY_WALL].concat(src.args).concat([sql]),
+            baml.sys.ProcessOptions { cwd: null, env: src.env, timeout_ms: null, stdin: null, stderr: null },
+        );
+        if (out.ok()) {
+            return out;
+        }
+        let stderr = out.stderr.to_string();
+        if (!is_busy(stderr) || attempt >= QUERY_ATTEMPTS) {
+            throw QueryFailed { sql: sql, stderr: stderr }
+        }
+        baml.sys.sleep(baml.time.Duration.from_milliseconds(delay));
+        attempt += 1;
+        delay = delay * 2;
+    }
+}
+
 // Runs one SELECT and returns each row as {column: value}.
 function query_rows(
     sql: string,
 ) -> map<string, json>[] throws QueryFailed | baml.errors.Io | baml.errors.Timeout | baml.json.ParseError | baml.json.PathError {
-    let src = query_source();
-    let out = baml.sys.exec(
-        "baml",
-        ["query", "--format", "json", "--max-wall", QUERY_WALL].concat(src.args).concat([sql]),
-        baml.sys.ProcessOptions { cwd: null, env: src.env, timeout_ms: null, stdin: null, stderr: null },
-    );
-    if (!out.ok()) {
-        throw QueryFailed { sql: sql, stderr: out.stderr.to_string() }
-    }
+    let out = run_query(sql);
     let doc = baml.json.parse(out.stdout.to_string());
     let columns = baml.json.path<map<string, json>[]>(doc, ".columns").map((c) -> {
         baml.json.path_or<string>(c, ".name", "")
