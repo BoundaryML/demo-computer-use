@@ -8,14 +8,14 @@
 //   makes the model commit to an element before picking a pixel (better
 //   grounding), and it makes traces readable.
 // - OpenApp / OpenUrl skip the most error-prone part of computer use (finding
-//   and clicking icons) by going through macOS `open`.
+//   and clicking icons) by going through the OS launcher (platform.baml).
 // - Done / GiveUp end the run and compile to nothing.
 
 const MAX_WAIT_SECONDS = 10;
 const MAX_SCROLL = 15;
 
 interface Command {
-    function ops(self, shot: Screenshot) -> Op[] throws never;
+    function ops(self, shot: Screenshot, os: Os) -> Op[] throws never;
 }
 
 class Click {
@@ -26,7 +26,7 @@ class Click {
     button: "left" | "right" | "middle",
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
             let p = shot.to_screen(self.x, self.y);
             [ClickOp { op: "click", x: p.x, y: p.y, button: self.button, count: 1 }]
         }
@@ -46,7 +46,7 @@ class DoubleClick {
     y: int,
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
             let p = shot.to_screen(self.x, self.y);
             [ClickOp { op: "click", x: p.x, y: p.y, button: "left", count: 2 }]
         }
@@ -67,10 +67,10 @@ class TypeText {
     press_enter: bool @description("Press Enter after typing"),
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
             let typed: Op[] = [TypeOp { op: "type", text: self.text }];
             if (self.press_enter) {
-                typed.push(chord("enter"));
+                typed.push(os.chord("enter"));
             }
             typed
         }
@@ -91,12 +91,12 @@ class TypeText {
 class PressKeys {
     action: "key",
     keys: string @description(
-        "A key or chord joined with '+', e.g. 'enter', 'escape', 'cmd+l', 'cmd+shift+t', 'tab', 'down'",
+        "A key or chord joined with '+', e.g. 'enter', 'escape', 'tab', 'down', 'cmd+l' (macOS) or 'ctrl+l' (Windows/Linux)",
     ),
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
-            [chord(self.keys)]
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
+            [os.chord(self.keys)]
         }
     }
 
@@ -115,7 +115,7 @@ class Scroll {
     amount: int @description("Scroll clicks, 1-15. ~5 is about half a page"),
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
             let p = shot.to_screen(self.x, self.y);
             let n = clamp(self.amount * 1.0, 1, MAX_SCROLL);
             let d = match (self.direction) {
@@ -144,7 +144,7 @@ class Drag {
     to_y: int,
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
             let a = shot.to_screen(self.from_x, self.from_y);
             let b = shot.to_screen(self.to_x, self.to_y);
             [DragOp { op: "drag", from_x: a.x, from_y: a.y, to_x: b.x, to_y: b.y }]
@@ -165,7 +165,7 @@ class Hover {
     y: int,
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
             let p = shot.to_screen(self.x, self.y);
             [MoveOp { op: "move", x: p.x, y: p.y }]
         }
@@ -180,11 +180,11 @@ class Hover {
 
 class OpenApp {
     action: "open_app",
-    name: string @description("macOS app name, e.g. 'Safari', 'Notes', 'System Settings'"),
+    name: string @description("App name as the OS shows it, e.g. 'Safari', 'Notes' (macOS); 'Notepad', 'Microsoft Edge' (Windows)"),
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
-            [OpenOp { op: "open", args: ["-a", self.name] }]
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
+            os.open_app(self.name)
         }
     }
 
@@ -200,8 +200,8 @@ class OpenUrl {
     url: string @description("Opens in the default browser"),
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
-            [OpenOp { op: "open", args: [self.url] }]
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
+            os.open_url(self.url)
         }
     }
 
@@ -217,7 +217,7 @@ class Wait {
     seconds: int @description("1-10. Use while something loads"),
 
     implements Command {
-        function ops(self, shot: Screenshot) -> Op[] {
+        function ops(self, shot: Screenshot, os: Os) -> Op[] {
             [SleepOp { op: "sleep", seconds: clamp(self.seconds * 1.0, 1, MAX_WAIT_SECONDS) * 1.0 }]
         }
     }
@@ -270,11 +270,11 @@ test "actions compile to screen-space ops" {
     let shot = Screenshot { path: "x.png", width: 1280, height: 720, screen_width: 1920, screen_height: 1080 };
     let click = Click { action: "click", target: "OK", x: 100, y: 100, button: "left" };
     assert.equal(
-        click.ops(shot),
+        click.ops(shot, Os { platform: "macos" }),
         [ClickOp { op: "click", x: 150, y: 150, button: "left", count: 1 }],
     );
     let typed = TypeText { action: "type", text: "hi", press_enter: true };
-    assert.equal(typed.ops(shot).length(), 2);
+    assert.equal(typed.ops(shot, Os { platform: "windows" }).length(), 2);
     let down = Scroll { action: "scroll", x: 0, y: 0, direction: "down", amount: 99 };
-    assert.equal(down.ops(shot), [ScrollOp { op: "scroll", x: 0, y: 0, dx: 0, dy: 0 - MAX_SCROLL }])
+    assert.equal(down.ops(shot, Os { platform: "macos" }), [ScrollOp { op: "scroll", x: 0, y: 0, dx: 0, dy: 0 - MAX_SCROLL }])
 }

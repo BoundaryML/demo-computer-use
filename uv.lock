@@ -444,6 +444,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pyautogui" },
     { name = "pydantic" },
+    { name = "pyperclip" },
 ]
 
 [package.metadata]
@@ -452,6 +453,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=10" },
     { name = "pyautogui", specifier = ">=0.9.54" },
     { name = "pydantic", specifier = ">=2" },
+    { name = "pyperclip", specifier = ">=1.9" },
 ]
 
 [[package]]

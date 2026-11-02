@@ -238,7 +238,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "goal is required"}, 400)
                 model = dict(DEFAULT_MODEL)
                 if body.get("provider"):
-                    model = {"provider": body["provider"]}
+                    model = {"provider": body["provider"], "platform": agent.PLATFORM}
                     if "base_url" in DEFAULT_MODEL and body["provider"] == "lmstudio":
                         model["base_url"] = DEFAULT_MODEL["base_url"]
                 if body.get("model"):

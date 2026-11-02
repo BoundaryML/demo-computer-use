@@ -1,6 +1,6 @@
 # demo-computer-use
 
-A computer-use agent for macOS where **BAML is the brain** and Python only does what BAML can't: take screenshots and move the mouse and keyboard. It runs on local open-source vision models through LM Studio by default, or on Claude. A live dashboard, built on `baml query`, shows every step: the screenshot the model saw, every option it considered, the one it chose, and exactly where it clicked.
+A computer-use agent for macOS, Windows, and Linux where **BAML is the brain** and Python only does what BAML can't: take screenshots and move the mouse and keyboard. It runs on local open-source vision models through LM Studio by default, or on Claude. A live dashboard, built on `baml query`, shows every step: the screenshot the model saw, every option it considered, the one it chose, and exactly where it clicked.
 
 ```
 uv run server.py          # http://127.0.0.1:8787, then type a goal
@@ -26,17 +26,29 @@ act(op)                   ◀──┤      loop:
 - **Memory.** Facts the model saves (text to copy, names, numbers) are fed back every turn. Without this, it loses information as soon as it switches apps and ping-pongs between them.
 - **Loop detection.** Warnings when the same action repeats, keeps coming back, keeps failing, or the step budget is nearly spent.
 - **Coordinate spaces.** Claude answers in screenshot pixels. Qwen3-VL answers on a 0–1000 grid. `Pilot.view()` handles both.
+- **Cross-platform** (`screen/platform.baml`). Python reports the OS; BAML compiles each action for it. The prompt names the OS and its shortcut modifier (`cmd` on macOS, `ctrl` elsewhere). Key names map per OS, so a model's `cmd+l` becomes `ctrl+l` on Windows. Apps and URLs open the native way:
+
+  | | `open_app` | `open_url` |
+  |---|---|---|
+  | macOS | `open -a App` | `open URL` |
+  | Windows | Win, type the name, Enter | Win+R, type the URL, Enter |
+  | Linux | Super, type the name, Enter | `xdg-open URL` |
 
 ## Setup
 
-Needs macOS, [uv](https://docs.astral.sh/uv/), and the [BAML CLI](https://boundaryml.com) (`brew install baml`).
+Needs [uv](https://docs.astral.sh/uv/) and the [BAML CLI](https://boundaryml.com) (`brew install baml` on macOS).
 
 ```bash
 uv sync
 baml generate                 # writes the typed Python SDK (baml_sdk/)
 ```
 
-Grant your terminal **Accessibility** and **Screen Recording** permission (System Settings → Privacy & Security).
+Permissions:
+- **macOS:** grant your terminal **Accessibility** and **Screen Recording** (System Settings → Privacy & Security).
+- **Windows:** no setup, but input can't reach elevated (admin) windows unless the agent runs elevated too.
+- **Linux:** an X11 session (pyautogui doesn't support Wayland), plus `scrot` for screenshots.
+
+macOS is tested end to end. Windows and Linux are untested on real machines: their action compilation is unit-tested, and the Windows path was dry-run through the full loop.
 
 **Models**
 
@@ -82,6 +94,7 @@ agent.py                  Python host: look/act + CLI
 server.py                 HTTP server: executor + query API + static frontend
 web/                      React dashboard
 baml_src/
+  screen/platform.baml    per-OS key names, shortcut modifier, app/URL launching
   clients.baml            model selection (Pilot): LM Studio / Claude, coordinate spaces
   screen/ops.baml         screen ops, coordinate mapping, key aliases
   agent/actions.baml      action space; each action compiles to ops

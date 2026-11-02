@@ -31,12 +31,12 @@ function sample_step(
 }
 
 function sample_run(steps: StepRecord[], max_steps: int) -> Run {
-    Run { id: "run-test", goal: "test", dir: "runs/run-test", max_steps: max_steps, pilot: Pilot.new(), steps: steps, notes: [] }
+    Run { id: "run-test", goal: "test", dir: "runs/run-test", max_steps: max_steps, pilot: Pilot.new(), os: Os { platform: "macos" }, steps: steps, notes: [] }
 }
 
 test "a reply with candidates and a union action parses into a Decision" {
     let shot = image.from_base64("aaa", "image/png");
-    let d = Decide@spec("goal", "(none yet)", [], [], shot, 1280, 720, "pixels").parse(
+    let d = Decide@spec("goal", "(none yet)", [], [], shot, 1280, 720, "pixels", "macos").parse(
         `
             {
                     "observation": "Safari is open",

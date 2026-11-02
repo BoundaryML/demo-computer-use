@@ -1,8 +1,8 @@
 // The contract between the BAML brain and the Python hands.
 //
 // Python sends a `Screenshot` in and gets `Op`s back. Ops are dumb, already in
-// logical screen points, with keys already normalized: the host executes them
-// verbatim, with no coordinate math or key aliasing of its own.
+// logical screen points, with keys already normalized for the host's OS (see
+// platform.baml): the host executes them verbatim.
 
 // Screenshots are downscaled to this width before the model sees them.
 // ~1280px is where vision models click most accurately.
@@ -93,58 +93,22 @@ class OpenOp {
     args: string[],
 }
 
+// A program to start, with its arguments (Linux: xdg-open).
+class LaunchOp {
+    op: "launch",
+    argv: string[],
+}
+
 class SleepOp {
     op: "sleep",
     seconds: float,
 }
 
-type Op = ClickOp | MoveOp | DragOp | TypeOp | KeyOp | ScrollOp | OpenOp | SleepOp;
-
-// Model-friendly key names -> pyautogui key names.
-const KEY_ALIASES: map<string, string> = {
-    "cmd": "command",
-    "meta": "command",
-    "super": "command",
-    "win": "command",
-    "opt": "option",
-    "alt": "option",
-    "control": "ctrl",
-    "return": "enter",
-    "esc": "escape",
-    "del": "delete",
-    "arrowup": "up",
-    "arrowdown": "down",
-    "arrowleft": "left",
-    "arrowright": "right",
-    "page_up": "pageup",
-    "page_down": "pagedown",
-    "spacebar": "space",
-};
-
-// "Cmd + Shift+T" -> ["command", "shift", "t"]
-function chord(keys: string) -> KeyOp {
-    let parts = keys.split("+")
-        .map((k) -> {
-            k.trim().to_lower_case()
-        })
-        .filter((k) -> {
-            k.length() > 0
-        })
-        .map((k) -> {
-            KEY_ALIASES.get(k) ?? k
-        });
-    KeyOp { op: "key", keys: parts }
-}
+type Op = ClickOp | MoveOp | DragOp | TypeOp | KeyOp | ScrollOp | OpenOp | LaunchOp | SleepOp;
 
 test "to_screen scales screenshot pixels to screen points and clamps" {
     let shot = Screenshot { path: "x.png", width: 1280, height: 720, screen_width: 1920, screen_height: 1080 };
     assert.equal(shot.to_screen(640, 360), Point { x: 960, y: 540 });
     assert.equal(shot.to_screen(1279, 719), Point { x: 1919, y: 1079 });
     assert.equal(shot.to_screen(5000, -10), Point { x: 1919, y: 0 })
-}
-
-test "chord normalizes aliases, case, and spacing" {
-    assert.equal(chord("Cmd + Shift+T").keys, ["command", "shift", "t"]);
-    assert.equal(chord("enter").keys, ["enter"]);
-    assert.equal(chord("ctrl+alt+del").keys, ["ctrl", "option", "delete"])
 }

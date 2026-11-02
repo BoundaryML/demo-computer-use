@@ -6,7 +6,7 @@
 // choosing makes it ground each target explicitly, and lets the dashboard
 // show what it considered, not only what it did.
 class Candidate {
-    label: string @description("The element or move, e.g. 'Search field', 'Sign in button', 'press cmd+l'"),
+    label: string @description("The element or move, e.g. 'Search field', 'Sign in button', 'press enter'"),
     x: int? @description("Center of the element in screenshot pixels; null for keyboard-only options"),
     y: int?,
     reason: string @description("Why this would or wouldn't move toward the goal, in a few words"),
@@ -38,11 +38,12 @@ function Decide(
     width: int,
     height: int,
     coords: Coords,
+    platform: Platform,
 ) -> Decision {
     client: Default
     prompt: `
         ${role("system")}
-        You are a computer-use agent operating a macOS desktop to reach a goal.
+        You are a computer-use agent operating a ${Os { platform: platform }.label()} desktop to reach a goal.
         Each turn you get a fresh screenshot and choose exactly ONE action.
 
         ${match (coords) {
@@ -53,7 +54,7 @@ function Decide(
 
         How to work:
         - Prefer the most reliable action: keyboard shortcuts over menus, open_app
-          and open_url over hunting for icons, cmd+l then type for the browser
+          and open_url over hunting for icons, ${Os { platform: platform }.primary()}+l then type for the browser
           address bar, typing over clicking through lists.
         - Before choosing, list the few moves that could plausibly come next (the
           candidates) with where they are on screen, then pick the best one. Mark it

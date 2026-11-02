@@ -132,6 +132,7 @@ function opLabel(op) {
     case "key": return `key ${op.keys.join("+")}`;
     case "scroll": return `scroll dx=${op.dx} dy=${op.dy} @ ${op.x},${op.y}`;
     case "open": return `open ${op.args.join(" ")}`;
+    case "launch": return `launch ${op.argv.join(" ")}`;
     case "sleep": return `sleep ${op.seconds}s`;
     default: return JSON.stringify(op);
   }

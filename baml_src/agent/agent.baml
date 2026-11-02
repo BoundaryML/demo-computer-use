@@ -57,6 +57,7 @@ class Run {
     dir: string,
     max_steps: int,
     pilot: Pilot,
+    os: Os,
     steps: StepRecord[],
     // Facts the model chose to remember (Decision.remember), oldest first.
     notes: string[],
@@ -188,6 +189,7 @@ function run_task(
     provider: Provider = "lmstudio",
     model: string? = null,
     base_url: string? = null,
+    platform: Platform = "macos",
 ) -> Outcome {
     let id = run_id ?? new_run_id();
     let pilot = Pilot.new(provider = provider, model = model, base_url = base_url);
@@ -197,6 +199,7 @@ function run_task(
         dir: `${runs_dir}/${id}`,
         max_steps: max_steps,
         pilot: pilot,
+        os: Os { platform: platform },
         steps: [],
         notes: [],
     };
@@ -206,7 +209,7 @@ function run_task(
         run,
         look,
         act,
-        $trace = trace.span(inputs = false).context(metadata = { "run_id": id, "goal": goal, "model": pilot.label() }),
+        $trace = trace.span(inputs = false).context(metadata = { "run_id": id, "goal": goal, "model": pilot.label(), "platform": platform }),
     )
 }
 
@@ -286,6 +289,7 @@ function turn(run: Run, shot: Screenshot, last_error: string?) -> Act | Outcome 
         view.width,
         view.height,
         run.pilot.coords,
+        run.os.platform,
     ).call(client = run.pilot.client);
     run.close_last(decision.verdict, last_error);
     run.remember(decision.remember ?? []);
@@ -293,7 +297,7 @@ function turn(run: Run, shot: Screenshot, last_error: string?) -> Act | Outcome 
     //# Compile the action to ops, or finish
     let action = decision.action;
     let ops: Op[] = match (action) {
-        let m: Move => compile(m, view),
+        let m: Move => compile(m, view, run.os),
         _ => [],
     };
     run.steps.push(
@@ -336,9 +340,9 @@ function perform(a: Act, act: (op: Op) -> void throws baml.errors.HostCallable) 
     null
 }
 
-function compile(m: Move, shot: Screenshot) -> Op[] {
+function compile(m: Move, shot: Screenshot, os: Os) -> Op[] {
     let c: Command = m;
-    c.ops(shot)
+    c.ops(shot, os)
 }
 
 function outcome(

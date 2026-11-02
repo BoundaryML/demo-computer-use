@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 
 import pyautogui
+import pyperclip
 from PIL import Image, ImageDraw
 
 # BOUNDARY_API_KEY=local records traces on this machine instead of the cloud.
@@ -35,6 +36,10 @@ if os.environ.get("BOUNDARY_API_KEY") == "local" and "SINAI_BAML_HOME" not in os
 
 import baml_sdk as b
 from baml_sdk import trace
+
+# BAML compiles actions to this OS's keys and launchers (baml_src/screen/platform.baml).
+PLATFORM = {"darwin": "macos", "win32": "windows"}.get(sys.platform, "linux")
+PASTE = ("command", "v") if PLATFORM == "macos" else ("ctrl", "v")
 
 pyautogui.FAILSAFE = True
 pyautogui.PAUSE = 0.05
@@ -59,7 +64,11 @@ def look(path: str, max_width: int = 1280) -> b.Screenshot:
 
 
 def type_text(text: str) -> None:
-    if text.isascii():
+    if not text.isascii():
+        # Typing can't produce non-ASCII reliably anywhere; paste it.
+        pyperclip.copy(text)
+        pyautogui.hotkey(*PASTE)
+    elif PLATFORM == "macos":
         # System Events types shifted characters (*, @, ?) correctly;
         # pyautogui.write drops the shift on macOS. Text goes in as argv,
         # never spliced into the script, so it can't break out of the string.
@@ -69,9 +78,8 @@ def type_text(text: str) -> None:
              "-e", "end run", text],
             check=True, capture_output=True, timeout=60,
         )
-    else:  # keystroke can't type non-ASCII reliably; paste it.
-        subprocess.run(["pbcopy"], input=text.encode(), check=True)
-        pyautogui.hotkey("command", "v")
+    else:
+        pyautogui.write(text, interval=0.01)
 
 
 @trace.instrument(trace.span(inputs=True))
@@ -95,8 +103,10 @@ def act(op) -> None:
                 pyautogui.scroll(op.dy)
             if op.dx:
                 pyautogui.hscroll(op.dx)
-        case "open":
+        case "open":  # macOS
             subprocess.run(["open", *op.args], check=True, capture_output=True, timeout=30)
+        case "launch":  # Linux (xdg-open)
+            subprocess.Popen(op.argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         case "sleep":
             time.sleep(op.seconds)
         case other:
@@ -111,7 +121,7 @@ def add_model_flags(p: argparse.ArgumentParser) -> None:
 
 
 def model_kwargs(args) -> dict:
-    kw = {"provider": args.provider}
+    kw = {"provider": args.provider, "platform": PLATFORM}
     if args.model:
         kw["model"] = args.model
     if args.base_url:
