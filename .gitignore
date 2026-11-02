@@ -1,0 +1,20 @@
+# Secrets
+.env
+
+# Runs: screenshots of your screen, and local traces
+runs/
+.baml/
+.traces/
+
+# Generated (run `baml generate`)
+baml_sdk/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local agent tooling
+.claude/
+.agents/
+.DS_Store

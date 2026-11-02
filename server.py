@@ -1,0 +1,278 @@
+"""Computer-use agent server.
+
+    uv run server.py            # http://localhost:8787
+    uv run server.py --port 9000
+    uv run server.py --provider claude       # default model for goals (LM Studio otherwise)
+
+Three APIs, all thin over BAML:
+
+  Execute (this process drives the screen, one goal at a time):
+    POST /api/execute                  {"goal": "...", "max_steps": 30, "provider"?: "lmstudio"|"claude", "model"?: "..."}
+    GET  /api/execute                  active run, queue, recent local runs
+    POST /api/execute/<run_id>/cancel  stop a queued or running goal
+
+  Query (`baml query` over the Boundary cloud project in baml.toml):
+    GET  /api/query/runs?limit=50      run summaries, newest first
+    GET  /api/query/runs/<run_id>      one run, step by step
+    POST /api/query/sql                {"sql": "SELECT ..."} -> rows (read-only)
+
+  Models: GET /api/models  vision models in LM Studio, plus Claude if ANTHROPIC_API_KEY is set
+
+  Home: GET / serves the React app in web/; GET /runs/... serves screenshots.
+
+Cloud queries authenticate with BOUNDARY_API_KEY if it's set, else with your
+`baml auth login` session.
+"""
+
+import argparse
+import json
+import mimetypes
+import queue
+import threading
+import time
+import traceback
+from dataclasses import dataclass, field, fields
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import baml_sdk as b
+import agent
+
+ROOT = Path(__file__).parent
+WEB = ROOT / "web"
+RUNS = ROOT / "runs"
+RECENT_LIMIT = 20
+
+
+class RunCancelled(Exception):
+    """Raised inside look/act to stop a run. BAML treats it as an abort."""
+
+
+@dataclass
+class Job:
+    run_id: str
+    goal: str
+    max_steps: int
+    model: dict  # run_task kwargs: provider, model, base_url
+    state: str = "queued"  # queued | running | done | gave_up | out_of_steps | error | cancelled
+    queued_at: float = field(default_factory=time.time)
+    started_at: float | None = None
+    ended_at: float | None = None
+    step: int = 0
+    latest_shot: str | None = None
+    summary: str | None = None
+    error: str | None = None
+    cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    def public(self) -> dict:
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "cancel"}
+
+
+class Executor:
+    """Runs goals one at a time: there's only one screen and one mouse."""
+
+    def __init__(self) -> None:
+        self.jobs: dict[str, Job] = {}
+        self.pending: queue.Queue[Job] = queue.Queue()
+        self.active: Job | None = None
+        self.lock = threading.Lock()
+        threading.Thread(target=self._worker, daemon=True, name="executor").start()
+
+    def submit(self, goal: str, max_steps: int, model: dict) -> Job:
+        job = Job(run_id=b.new_run_id(), goal=goal, max_steps=max_steps, model=model)
+        with self.lock:
+            self.jobs[job.run_id] = job
+        self.pending.put(job)
+        return job
+
+    def cancel(self, run_id: str) -> Job | None:
+        job = self.jobs.get(run_id)
+        if job and job.state in ("queued", "running"):
+            job.cancel.set()
+            if job.state == "queued":
+                job.state = "cancelled"
+        return job
+
+    def status(self) -> dict:
+        with self.lock:
+            jobs = sorted(self.jobs.values(), key=lambda j: j.queued_at, reverse=True)
+            return {
+                "active": self.active.public() if self.active else None,
+                "queue": [j.public() for j in jobs if j.state == "queued"][::-1],
+                "recent": [j.public() for j in jobs if j.state not in ("queued", "running")][:RECENT_LIMIT],
+            }
+
+    def _worker(self) -> None:
+        while True:
+            job = self.pending.get()
+            if job.cancel.is_set():
+                continue
+            with self.lock:
+                self.active = job
+            job.state, job.started_at = "running", time.time()
+            try:
+                outcome = b.run_task(
+                    job.goal, self._look(job), self._act(job),
+                    max_steps=job.max_steps, run_id=job.run_id, **job.model,
+                )
+                job.state, job.summary = outcome.status, outcome.summary
+            except Exception as e:  # cancel, failsafe, or a model/provider error
+                job.state = "cancelled" if job.cancel.is_set() else "error"
+                job.error = f"{type(e).__name__}: {e}".splitlines()[0][:500]
+                if job.state == "error":
+                    traceback.print_exc()
+            finally:
+                job.ended_at = time.time()
+                with self.lock:
+                    self.active = None
+
+    # look/act wrap the traced host functions with cancel checks and progress.
+    def _look(self, job: Job):
+        def look(path: str) -> b.Screenshot:
+            if job.cancel.is_set():
+                raise RunCancelled("cancelled from the dashboard")
+            shot = agent.look(path)
+            job.step += 1
+            job.latest_shot = path
+            return shot
+        return look
+
+    def _act(self, job: Job):
+        def act(op) -> None:
+            if job.cancel.is_set():
+                raise RunCancelled("cancelled from the dashboard")
+            agent.act(op)
+        return act
+
+
+EXECUTOR = Executor()
+DEFAULT_MODEL: dict = {"provider": "lmstudio"}
+
+
+def dump(model) -> object:
+    if isinstance(model, list):
+        return [dump(m) for m in model]
+    if hasattr(model, "model_dump"):
+        return model.model_dump(mode="json")
+    return model
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "sinai/0.1"
+
+    # ---- plumbing ----
+
+    def log_message(self, fmt, *args) -> None:
+        if "/api/" in self.path and self.command == "GET":
+            return  # polling is noisy
+        super().log_message(fmt, *args)
+
+    def send_json(self, body: object, status: int = 200) -> None:
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def send_file(self, path: Path, base: Path) -> None:
+        path = path.resolve()
+        if not path.is_relative_to(base.resolve()) or not path.is_file():
+            return self.send_json({"error": "not found"}, 404)
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def body(self) -> dict:
+        n = int(self.headers.get("Content-Length") or 0)
+        return json.loads(self.rfile.read(n) or b"{}")
+
+    def guard(self, fn) -> None:
+        try:
+            fn()
+        except Exception as e:
+            traceback.print_exc()
+            self.send_json({"error": f"{type(e).__name__}: {e}"}, 500)
+
+    # ---- routes ----
+
+    def do_GET(self) -> None:
+        url = urlparse(self.path)
+        parts = [p for p in url.path.split("/") if p]
+        match parts:
+            case ["api", "execute"]:
+                self.send_json(EXECUTOR.status())
+            case ["api", "models"]:
+                def models():
+                    choices = dump(b.available_models(base_url=DEFAULT_MODEL.get("base_url")))
+                    choices["default"] = DEFAULT_MODEL
+                    self.send_json(choices)
+                self.guard(models)
+            case ["api", "query", "runs"]:
+                limit = int(parse_qs(url.query).get("limit", ["50"])[0])
+                self.guard(lambda: self.send_json(dump(b.list_runs(limit=limit))))
+            case ["api", "query", "runs", run_id]:
+                def detail():
+                    run = b.get_run(run_id)
+                    self.send_json(dump(run) if run else {"error": "no such run yet"}, 200 if run else 404)
+                self.guard(detail)
+            case ["runs", *rest]:
+                self.send_file(RUNS.joinpath(*rest), RUNS)
+            case []:
+                self.send_file(WEB / "index.html", WEB)
+            case _:
+                self.send_file(WEB.joinpath(*parts), WEB)
+
+    def do_POST(self) -> None:
+        parts = [p for p in urlparse(self.path).path.split("/") if p]
+        match parts:
+            case ["api", "execute"]:
+                body = self.body()
+                goal = (body.get("goal") or "").strip()
+                if not goal:
+                    return self.send_json({"error": "goal is required"}, 400)
+                model = dict(DEFAULT_MODEL)
+                if body.get("provider"):
+                    model = {"provider": body["provider"]}
+                    if "base_url" in DEFAULT_MODEL and body["provider"] == "lmstudio":
+                        model["base_url"] = DEFAULT_MODEL["base_url"]
+                if body.get("model"):
+                    model["model"] = body["model"]
+                if model["provider"] not in ("lmstudio", "claude"):
+                    return self.send_json({"error": f"unknown provider {model['provider']!r}"}, 400)
+                if model["provider"] == "claude" and not any(
+                    o.provider == "claude" for o in b.available_models().options
+                ):
+                    return self.send_json({"error": "Claude needs ANTHROPIC_API_KEY set on the server"}, 400)
+                job = EXECUTOR.submit(goal, int(body.get("max_steps") or 30), model)
+                self.send_json(job.public(), 202)
+            case ["api", "execute", run_id, "cancel"]:
+                job = EXECUTOR.cancel(run_id)
+                self.send_json(job.public() if job else {"error": "no such job"}, 200 if job else 404)
+            case ["api", "query", "sql"]:
+                sql = (self.body().get("sql") or "").strip()
+                self.guard(lambda: self.send_json(b.query_rows(sql)))
+            case _:
+                self.send_json({"error": "not found"}, 404)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8787)
+    agent.add_model_flags(p)
+    a = p.parse_args()
+    DEFAULT_MODEL.clear()
+    DEFAULT_MODEL.update(agent.model_kwargs(a))
+    RUNS.mkdir(exist_ok=True)
+    print(f"sinai: http://{a.host}:{a.port}  (default model: {DEFAULT_MODEL})")
+    ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

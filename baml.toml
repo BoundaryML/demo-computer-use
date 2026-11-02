@@ -1,0 +1,19 @@
+[package]
+name = "sinai"
+
+# [scripts]
+# dev = "-f main"
+
+# Add a client generator, then generate its SDK:
+#   baml generate add python/pydantic2
+#   baml generate
+#
+# Run `baml generate add --help` to see every supported output type.
+
+[boundary]
+project = "boundary/codeturtle"
+
+[generator.py]
+output_type = "python/pydantic"
+output_dir = "."
+naming_convention = "preserve-case"

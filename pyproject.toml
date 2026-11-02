@@ -1,0 +1,15 @@
+[project]
+name = "sinai"
+version = "0.1.0"
+description = "Computer-use agent: BAML brain, Python hands"
+requires-python = ">=3.11"
+dependencies = [
+    "baml_bridge==0.23.1.dev2026103000",
+    "pyautogui>=0.9.54",
+    "pillow>=10",
+    "pydantic>=2",
+]
+
+[tool.uv]
+package = false
+prerelease = "allow"
