@@ -55,10 +55,9 @@ macOS is tested end to end. Windows and Linux are untested on real machines: the
 - **LM Studio (default):** download `qwen3-vl-4b-instruct` and start the local server (Settings → Local API server). The default URL is `http://127.0.0.1:1235/v1`; change it with `--base-url`. Give the model a context length of at least 8192.
 - **Claude:** set `ANTHROPIC_API_KEY`. The UI only offers Claude when the key is set.
 
-**Traces**
-
-- **Boundary cloud:** set `[boundary] project` in `baml.toml` to your `org/project`, then `baml auth login`.
-- **Local only:** `export BOUNDARY_API_KEY=local`. Traces go to this project's `.baml/` and are queried from there.
+**Traces.** The mode is picked at startup, and the server prints which one it chose:
+- **Boundary cloud:** used when `BOUNDARY_API_KEY` is a real key, or `baml auth login` is verified. Set `[boundary] project` in `baml.toml` to your `org/project`.
+- **Local:** used when `BOUNDARY_API_KEY=local`, or when there are no cloud credentials. Traces go to this project's `.baml/`, where the dashboard queries them.
 
 ## Run
 

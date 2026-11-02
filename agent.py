@@ -26,13 +26,32 @@ import pyautogui
 import pyperclip
 from PIL import Image, ImageDraw
 
-# BOUNDARY_API_KEY=local records traces on this machine instead of the cloud.
-# By default the bridge writes them to the shared ~/.baml store (every
-# project's runs: slow to query). Point it at this project's .baml/, which is
-# where `baml query --local` reads. Must run before baml_sdk is imported.
-if os.environ.get("BOUNDARY_API_KEY") == "local" and "COMPUTER_USE_BAML_HOME" not in os.environ:
+# Where traces go. Decided once, here, before baml_sdk is imported:
+#   cloud: BOUNDARY_API_KEY is a real key, or `baml auth login` is verified.
+#   local: BOUNDARY_API_KEY=local, or no cloud credentials at all.
+# Without cloud credentials BAML would quietly record to the shared ~/.baml
+# store (every project's runs: slow to query) while `baml query` reads this
+# project's .baml/, so the dashboard showed nothing. In local mode, pin both
+# to this project's .baml/.
+PROJECT_TRACES = Path(__file__).resolve().parent / ".baml"
+
+
+def _trace_mode() -> str:
+    key = os.environ.get("BOUNDARY_API_KEY", "").strip()
+    if key:
+        return "local" if key == "local" else "cloud"
+    try:
+        status = subprocess.run(["baml", "auth", "status"], capture_output=True, text=True, timeout=30)
+        return "cloud" if "(verified)" in status.stdout + status.stderr else "local"
+    except (OSError, subprocess.SubprocessError):
+        return "local"
+
+
+TRACE_MODE = _trace_mode()
+if TRACE_MODE == "local" and "COMPUTER_USE_BAML_HOME" not in os.environ:
+    os.environ["BOUNDARY_API_KEY"] = "local"
     os.environ["COMPUTER_USE_BAML_HOME"] = os.environ.get("BAML_HOME", str(Path.home() / ".baml"))
-    os.environ["BAML_HOME"] = str(Path(__file__).resolve().parent / ".baml")
+    os.environ["BAML_HOME"] = str(PROJECT_TRACES)
 
 import baml_sdk as b
 from baml_sdk import trace

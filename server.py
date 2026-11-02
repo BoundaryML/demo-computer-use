@@ -292,6 +292,10 @@ def main() -> None:
     DEFAULT_MODEL.update(agent.model_kwargs(a))
     RUNS.mkdir(exist_ok=True)
     print(f"computer-use: http://{a.host}:{a.port}  (default model: {DEFAULT_MODEL})")
+    if agent.TRACE_MODE == "local":
+        print(f"traces: local, in {agent.PROJECT_TRACES}")
+    else:
+        print("traces: Boundary cloud (baml.toml [boundary] project)")
     Server((a.host, a.port), Handler).serve_forever()
 
 
