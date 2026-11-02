@@ -1,4 +1,4 @@
-// Sinai: live dashboard for the computer-use agent.
+// Live dashboard for the BAML computer-use agent.
 //
 // Client-side only (React + htm, no build step). Talks to server.py:
 //   /api/execute      local executor: what's running/queued right now (fast, polled often)
@@ -226,7 +226,7 @@ function Composer({ onSubmitted }) {
       </div>
       ${err && html`<p className="error-text">${err}</p>`}
       ${models?.lmstudio_note && html`<p className="warn-box">${models.lmstudio_note}</p>`}
-      <p className="hint">The agent takes over this Mac's mouse and keyboard. Slam the pointer into a screen corner to abort.</p>
+      <p className="hint">The agent takes over this computer's mouse and keyboard. Slam the pointer into a screen corner to abort.</p>
     </form>`;
 }
 
@@ -513,7 +513,7 @@ function App() {
   return html`
     <div className="app">
       <header className="topbar">
-        <a className="brand" href="#/"><span className="logo" />Sinai<span className="muted"> · computer-use agent</span></a>
+        <a className="brand" href="#/"><span className="logo" />Computer Use<span className="muted"> · BAML agent</span></a>
         <span className="muted small mono">${anyLocalLive ? html`<i className="pulse" /> agent running` : "idle"}</span>
       </header>
       <div className="layout">

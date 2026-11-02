@@ -37,7 +37,7 @@ function query_source() -> QuerySource {
     if (env_or_null("BOUNDARY_API_KEY") != "local") {
         return QuerySource { args: [], env: null };
     }
-    let real_home = env_or_null("SINAI_BAML_HOME");
+    let real_home = env_or_null("COMPUTER_USE_BAML_HOME");
     QuerySource {
         args: ["--local", "--agent-skill-check", "off"],
         // PATH too: with an env override, the program lookup otherwise can't find `baml`.

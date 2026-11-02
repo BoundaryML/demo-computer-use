@@ -30,8 +30,8 @@ from PIL import Image, ImageDraw
 # By default the bridge writes them to the shared ~/.baml store (every
 # project's runs: slow to query). Point it at this project's .baml/, which is
 # where `baml query --local` reads. Must run before baml_sdk is imported.
-if os.environ.get("BOUNDARY_API_KEY") == "local" and "SINAI_BAML_HOME" not in os.environ:
-    os.environ["SINAI_BAML_HOME"] = os.environ.get("BAML_HOME", str(Path.home() / ".baml"))
+if os.environ.get("BOUNDARY_API_KEY") == "local" and "COMPUTER_USE_BAML_HOME" not in os.environ:
+    os.environ["COMPUTER_USE_BAML_HOME"] = os.environ.get("BAML_HOME", str(Path.home() / ".baml"))
     os.environ["BAML_HOME"] = str(Path(__file__).resolve().parent / ".baml")
 
 import baml_sdk as b

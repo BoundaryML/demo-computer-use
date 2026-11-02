@@ -165,7 +165,7 @@ def dump(model) -> object:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "sinai/0.1"
+    server_version = "computer-use/0.1"
 
     # ---- plumbing ----
 
@@ -291,7 +291,7 @@ def main() -> None:
     DEFAULT_MODEL.clear()
     DEFAULT_MODEL.update(agent.model_kwargs(a))
     RUNS.mkdir(exist_ok=True)
-    print(f"sinai: http://{a.host}:{a.port}  (default model: {DEFAULT_MODEL})")
+    print(f"computer-use: http://{a.host}:{a.port}  (default model: {DEFAULT_MODEL})")
     Server((a.host, a.port), Handler).serve_forever()
 
 

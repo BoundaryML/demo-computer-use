@@ -1,5 +1,5 @@
 [project]
-name = "sinai"
+name = "demo-computer-use"
 version = "0.1.0"
 description = "Computer-use agent for macOS, Windows, and Linux: BAML brain, Python hands"
 requires-python = ">=3.11"
