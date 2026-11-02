@@ -36,7 +36,7 @@ function sample_run(steps: StepRecord[], max_steps: int) -> Run {
 
 test "a reply with candidates and a union action parses into a Decision" {
     let shot = image.from_base64("aaa", "image/png");
-    let d = Decide@spec("goal", "(none yet)", [], [], shot, 1280, 720, "pixels", "macos").parse(
+    let d = Decide@spec("goal", "", [], [], [], [], "", shot, 1, 1280, 720, "pixels", "macos").parse(
         `
             {
                     "observation": "Safari is open",
@@ -97,17 +97,75 @@ test "a healthy run gets no warnings until the budget runs low" {
     assert.equal(sample_run([sample_step(1, a, "succeeded")], 3).warnings().length(), 1)
 }
 
-test "history shows the newest steps and counts the rest" {
-    let a = Wait { action: "wait", seconds: 1 };
+// Writes a stand-in screenshot so trajectory() can load step images.
+function frame_steps(n: int) -> StepRecord[] {
+    baml.fs.mkdir("runs/_test", baml.fs.MkdirOptions { recursive: true });
     let steps: StepRecord[] = [];
     let i = 0;
-    while (i < HISTORY_WINDOW + 2) {
+    while (i < n) {
         i += 1;
-        steps.push(sample_step(i, a, "succeeded"));
+        let path = `runs/_test/step-${i}.png`;
+        baml.fs.write(path, "png");
+        let step = sample_step(i, Wait { action: "wait", seconds: i }, "succeeded");
+        step.screenshot = path;
+        steps.push(step);
     }
-    let h = sample_run(steps, 50).history();
-    assert.is_true(h.starts_with("(2 earlier steps omitted)"));
-    assert.contains(h, `#${HISTORY_WINDOW + 2} wait 1s`)
+    steps
+}
+
+test "past steps replay as screenshots, oldest ones as text" {
+    let run = sample_run(frame_steps(4), 30);
+    run.pilot.frames = 2;
+    let past = run.trajectory();
+    assert.equal(past.map((p) -> { p.step }), [3, 4]);
+    assert.contains(run.earlier(), "#1 wait 1s");
+    assert.contains(run.earlier(), "#2 wait 2s");
+    assert.is_true(!run.earlier().includes("#3"));
+    assert.equal(sample_run(frame_steps(2), 30).earlier(), "")
+}
+
+test "an execution error shows up on the next replayed turn" {
+    let steps = frame_steps(3);
+    steps[1].error = "click failed";
+    let run = sample_run(steps, 30);
+    run.pilot.frames = 30;
+    let past = run.trajectory();
+    assert.equal(past[1].feedback, "");
+    assert.contains(past[2].feedback, "click failed")
+}
+
+// The trajectory must be a stable prefix: rendering step N's request must
+// start with exactly what step N-1's request sent, cache marker last.
+test "the trajectory renders as cacheable conversation turns" {
+    let claude = Pilot.new(provider = "claude");
+    let run = sample_run(frame_steps(3), 30);
+    run.pilot = claude;
+    let shot = image.from_base64("aaa", "image/png");
+    let body = Decide@spec("g", run.earlier(), run.trajectory(), [], ["use Slack"], [], "", shot, 4, 1280, 720, "pixels", "macos")
+        .build_request(client = claude.client)
+        .body
+        .to_string();
+    let msgs = baml.json.path<json[]>(baml.json.parse(body), ".messages");
+    // 3 x (screenshot, decision) + current; the goal shares the first user turn
+    assert.equal(msgs.length(), 7);
+    assert.equal(baml.json.path<string>(msgs[5], ".role"), "assistant");
+    assert.contains(baml.json.stringify(msgs[5]), "cache_control");
+    assert.is_true(!baml.json.stringify(msgs[4]).includes("cache_control"));
+    assert.contains(baml.json.stringify(msgs[6]), "MESSAGE FROM THE USER (follow it; it overrides your plan): use Slack")
+}
+
+test "ask_user parses, and without a human the model is told so" {
+    let shot = image.from_base64("aaa", "image/png");
+    let d = Decide@spec("message Bob hi", "", [], [], [], [], "", shot, 1, 1280, 720, "pixels", "macos").parse(`{
+        "observation": "desktop", "verdict": "first_step", "candidates": [], "remember": [],
+        "plan": "find out which app", "expectation": "an answer",
+        "action": {"action": "ask_user", "question": "Which app should I use to message Bob?", "options": ["Messages", "Slack"]}
+    }`);
+    assert.is_type<AskUser>(d.action);
+    let q = Ask { kind: "ask", step: 1, question: "Which app?", options: [] };
+    assert.equal(consult(q, null), NO_ONE_TO_ASK);
+    let answer = consult(q, (question, options) -> { " Slack " });
+    assert.equal(answer, `You asked the user "Which app?" and they answered: Slack`)
 }
 
 test "close_last records the verdict and error on the previous step" {

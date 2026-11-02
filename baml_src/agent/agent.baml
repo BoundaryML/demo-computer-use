@@ -1,17 +1,17 @@
-// The agent loop. Python hands BAML two callables, its eyes and hands:
+// The agent loop. Python hands BAML callables for what only the host can do:
 //
-//     outcome = run_task(goal, look, act)
+//     outcome = run_task(goal, look, act, ask=ask)
 //
-//   look(path) -> Screenshot   save a screenshot to `path` and describe it
-//   act(op)                    perform one screen-space op
+//   look(path) -> Screenshot          save a screenshot to `path` and describe it
+//   act(op)                           perform one screen-space op
+//   ask(question, options) -> answer  optional: ask the human (dashboard/terminal)
+//   inbox() -> messages               optional: steering messages sent since last turn
 //
 // Everything else happens here: deciding, history, loop detection, and
 // compiling actions to ops. One run is one call, so the trace is one tree:
 // run_loop > turn > Decide, with the host's look/act spans nested inside.
 
 const DEFAULT_MAX_STEPS = 30;
-// Steps shown to the model in full; older ones collapse to a count.
-const HISTORY_WINDOW = 15;
 // The same action this many times in a row counts as stuck.
 const REPEAT_LIMIT = 3;
 // Actions examined for back-and-forth loops (A B A B ...).
@@ -21,7 +21,8 @@ const CYCLE_REPEATS = 3;
 const MAX_NOTES = 20;
 // Consecutive replies that don't fit the schema before the run gives up.
 const MAX_BAD_REPLIES = 3;
-const BAD_REPLY_HINT = "Your last reply didn't match the required JSON. Use only the listed values: verdict is one of succeeded, failed, unclear, first_step; action.action is one of click, double_click, type, key, scroll, drag, hover, open_app, open_url, wait, done, give_up.";
+const BAD_REPLY_HINT = "Your last reply didn't match the required JSON. Use only the listed values: verdict is one of succeeded, failed, unclear, first_step; action.action is one of click, double_click, type, key, scroll, drag, hover, open_app, open_url, wait, ask_user, done, give_up.";
+const NO_ONE_TO_ASK = "No one is available to answer questions in this run. Decide with your best judgment, or give_up if you can't.";
 // Lets the UI settle after acting, before the next screenshot.
 const SETTLE_SECONDS = 0.8;
 // Host exception classes that stop the run instead of being reported to the
@@ -74,25 +75,38 @@ class Run {
         }
     }
 
-    function history(self) -> string {
+    // Index of the first step still replayed with its screenshot.
+    function window_start(self) -> int {
         let n = self.steps.length();
-        if (n == 0) {
-            return "(none yet)";
-        }
-        let start = if (n > HISTORY_WINDOW) {
-            n - HISTORY_WINDOW
+        if (n > self.pilot.frames) {
+            n - self.pilot.frames
         } else {
             0
-        };
-        let shown = self.steps.slice(start, n).map((s) -> {
-            s.to_string()
-        });
-        let omitted: string[] = if (start > 0) {
-            [`(${start} earlier steps omitted)`]
-        } else {
-            []
-        };
-        omitted.concat(shown).join("\n")
+        }
+    }
+
+    // One-line summaries of steps whose screenshots are no longer replayed.
+    function earlier(self) -> string {
+        let start = self.window_start();
+        if (start == 0) {
+            return "";
+        }
+        let lines = self.steps.slice(0, start).map((s) -> { s.to_string() });
+        `EARLIER STEPS (screenshots no longer shown):\n${lines.join("\n")}`
+    }
+
+    // The replayed steps, oldest first. Each turn's text depends only on that
+    // step and the one before it, so the rendered prefix never changes as the
+    // run grows and the provider can serve it from its cache.
+    function trajectory(self) -> PastTurn[] throws baml.errors.Io | baml.errors.InvalidArgument | baml.json.SerializationError {
+        self.steps.slice(self.window_start(), self.steps.length()).map((s) -> {
+            PastTurn {
+                step: s.index,
+                screen: image.from_file(s.screenshot, "image/png"),
+                feedback: feedback_text(self.steps.at(s.index - 2)?.error),
+                reply: baml.json.stringify(s.decision),
+            }
+        })
     }
 
     // Nudges for the model when the loop looks unhealthy.
@@ -168,6 +182,13 @@ class Act {
     ops: Op[],
 }
 
+class Ask {
+    kind: "ask",
+    step: int,
+    question: string,
+    options: string[],
+}
+
 class Outcome {
     kind: "finished",
     run_id: string,
@@ -190,6 +211,8 @@ function run_task(
     model: string? = null,
     base_url: string? = null,
     platform: Platform = "macos",
+    ask: ((question: string, options: string[]) -> string throws baml.errors.HostCallable)? = null,
+    inbox: (() -> string[] throws baml.errors.HostCallable)? = null,
 ) -> Outcome {
     let id = run_id ?? new_run_id();
     let pilot = Pilot.new(provider = provider, model = model, base_url = base_url);
@@ -209,6 +232,8 @@ function run_task(
         run,
         look,
         act,
+        ask,
+        inbox,
         $trace = trace.span(inputs = false).context(metadata = { "run_id": id, "goal": goal, "model": pilot.label(), "platform": platform }),
     )
 }
@@ -223,19 +248,27 @@ function run_loop(
     run: Run,
     look: (path: string) -> Screenshot,
     act: (op: Op) -> void throws baml.errors.HostCallable,
+    ask: ((question: string, options: string[]) -> string throws baml.errors.HostCallable)?,
+    inbox: (() -> string[] throws baml.errors.HostCallable)?,
 ) -> Outcome {
     let last_error: string? = null;
+    let hint: string? = null;
     let bad_replies = 0;
     while (true) {
         let index = run.steps.length() + 1;
         //# Look
         let shot = look(`${run.dir}/step-${index}.png`, $trace = trace.context(metadata = { "step": index }));
+        //# Steering: anything the user sent since the last turn
+        let messages: string[] = if (inbox) { inbox() } else { [] };
+        run.remember(messages.map((m) -> { `The user told you: ${m}` }));
         //# Decide. A reply that doesn't fit the schema (small local models
-        //# invent action names) is fed back as an error, not a crash.
+        //# invent action names) is fed back as a warning, not a crash.
         let next = turn(
             run,
             shot,
             last_error,
+            hint,
+            messages,
             $trace = trace.span(output = true).context(metadata = { "step": index }),
         ) catch (e) {
             let p: ai.errors.ParseFailed => {
@@ -243,49 +276,76 @@ function run_loop(
                 if (bad_replies >= MAX_BAD_REPLIES) {
                     throw p
                 }
-                last_error = BAD_REPLY_HINT;
+                hint = BAD_REPLY_HINT;
                 continue;
             }
         };
         bad_replies = 0;
-        //# Act, or stop
+        hint = null;
+        //# Act, ask the user, or stop
         match (next) {
             let done: Outcome => {
                 return done;
             },
             let a: Act => {
-                last_error
-                    = perform(
-                        a,
-                        act,
-                        $trace = trace.span(inputs = true).context(metadata = { "step": index }),
-                    );
+                last_error = perform(a, act, $trace = trace.span(inputs = true).context(metadata = { "step": index }));
+            },
+            let q: Ask => {
+                last_error = null;
+                let answer = consult(q, ask, $trace = trace.span(inputs = true, output = true).context(metadata = { "step": index }));
+                run.remember([answer]);
             },
         }
     }
 }
 
-function turn(run: Run, shot: Screenshot, last_error: string?) -> Act | Outcome {
+// Puts the model's question to the human and returns the note to remember.
+// Without an `ask` callback (headless runs) the model is told no one can answer.
+function consult(
+    q: Ask,
+    ask: ((question: string, options: string[]) -> string throws baml.errors.HostCallable)?,
+) -> string {
+    if (!ask) {
+        return NO_ONE_TO_ASK;
+    }
+    let answer = ask(q.question, q.options).trim();
+    let said = if (answer) { answer } else { "(no answer)" };
+    `You asked the user "${q.question}" and they answered: ${said}`
+}
+
+function feedback_text(error: string?) -> string {
+    if (error) {
+        return `Result of your previous action: it failed to execute: ${error}`;
+    }
+    ""
+}
+
+function turn(
+    run: Run,
+    shot: Screenshot,
+    last_error: string?,
+    hint: string?,
+    messages: string[],
+) -> Act | Ask | Outcome {
     //# Out of budget: stop before spending another model call
     if (run.steps.length() >= run.max_steps) {
         run.close_last("unclear", last_error);
         return outcome(run, "out_of_steps", `Stopped after ${run.max_steps} steps without finishing.`);
     }
-    //# Look at the screen and decide
+    //# Look at the screen and decide, with the trajectory so far
     let index = run.steps.length() + 1;
     let view = run.pilot.view(shot);
+    let warnings = run.warnings().concat(if (hint) { [hint] } else { [] });
     let decision = Decide@spec(
         run.goal,
-        run.history(),
+        run.earlier(),
+        run.trajectory(),
         run.notes,
-        run.warnings().concat(
-            if (last_error) {
-                [`The last action failed to execute: ${last_error}`]
-            } else {
-                []
-            },
-        ),
+        messages,
+        warnings,
+        feedback_text(last_error),
         shot.image(),
+        index,
         view.width,
         view.height,
         run.pilot.coords,
@@ -294,7 +354,7 @@ function turn(run: Run, shot: Screenshot, last_error: string?) -> Act | Outcome 
     run.close_last(decision.verdict, last_error);
     run.remember(decision.remember ?? []);
     log.info(`[${run.id}] #${index} ${decision.action}`);
-    //# Compile the action to ops, or finish
+    //# Compile the action to ops, ask, or finish
     let action = decision.action;
     let ops: Op[] = match (action) {
         let m: Move => compile(m, view, run.os),
@@ -313,6 +373,7 @@ function turn(run: Run, shot: Screenshot, last_error: string?) -> Act | Outcome 
     match (action) {
         let d: Done => outcome(run, "done", d.summary),
         let g: GiveUp => outcome(run, "gave_up", g.reason),
+        let q: AskUser => Ask { kind: "ask", step: index, question: q.question, options: q.options },
         _ => {
             Act {
                 kind: "act",

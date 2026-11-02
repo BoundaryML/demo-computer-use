@@ -132,6 +132,17 @@ def act(op) -> None:
             raise ValueError(f"unknown op {other}")
 
 
+def ask_in_terminal(question: str, options: list[str]) -> str:
+    """ask_user from the CLI: pick a numbered option or type an answer."""
+    print(f"\n? {question}")
+    for i, option in enumerate(options, 1):
+        print(f"  {i}. {option}")
+    answer = input("> ").strip()
+    if answer.isdigit() and 1 <= int(answer) <= len(options):
+        return options[int(answer) - 1]
+    return answer
+
+
 def add_model_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--provider", choices=["lmstudio", "claude"], default="lmstudio",
                    help="lmstudio (default): a local open-source VLM; claude: Claude Sonnet")
@@ -156,7 +167,9 @@ def main() -> int:
     args = p.parse_args()
 
     try:
-        outcome = b.run_task(args.goal, look, act, max_steps=args.max_steps, **model_kwargs(args))
+        outcome = b.run_task(
+            args.goal, look, act, ask=ask_in_terminal, max_steps=args.max_steps, **model_kwargs(args)
+        )
     except pyautogui.FailSafeException:
         print("aborted: mouse moved to a screen corner")
         return 130

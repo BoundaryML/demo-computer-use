@@ -49,6 +49,15 @@ class DecideRow {
     error_type: string?,
     grid_width: int?,
     grid_height: int?,
+    user_messages: string[]?,
+}
+
+// An ask_user step: the note recorded from the human's answer.
+class ConsultRow {
+    run_id: string,
+    step: int,
+    duration: int,
+    answer: string?,
 }
 
 class LookRow {
@@ -107,6 +116,10 @@ class StepDetail {
     // 0-1000 grid). Overlays position candidates against this.
     grid_width: int?,
     grid_height: int?,
+    // Steering messages the model received on this step.
+    user_messages: string[],
+    // For an ask_user step: what the human answered.
+    answer: string?,
 }
 
 class RunDetail {
@@ -257,6 +270,7 @@ function step_detail(
     next: DecideRow?,
     look: LookRow?,
     perform: PerformRow?,
+    consult: ConsultRow?,
 ) -> StepDetail {
     let decision = d.decision;
     StepDetail {
@@ -284,6 +298,8 @@ function step_detail(
         model_calls: d.calls ?? 1,
         grid_width: d.grid_width,
         grid_height: d.grid_height,
+        user_messages: d.user_messages ?? [],
+        answer: consult?.answer,
     }
 }
 
@@ -304,7 +320,7 @@ function get_run(run_id: string) -> RunDetail? {
         step_rows<DecideRow>(
             "span_name = 'user.Decide'",
             `
-                status, output_value AS decision, input_args['warnings'] AS warnings, input_args['width'] AS grid_width, input_args['height'] AS grid_height,
+                status, output_value AS decision, input_args['warnings'] AS warnings, input_args['width'] AS grid_width, input_args['height'] AS grid_height, input_args['user_messages'] AS user_messages,
                              error_value['error']['$class'] AS error_type, ${USAGE_COLUMNS}
             `,
             run_id,
@@ -318,6 +334,9 @@ function get_run(run_id: string) -> RunDetail? {
             run_id,
         )
     };
+    let consults = spawn {
+        step_rows<ConsultRow>("span_name = 'user.consult'", "output_value AS answer", run_id)
+    };
     //# Join by step number
     let run = merge(await aggs, await fins).at(0)
         ?? return null;
@@ -326,6 +345,7 @@ function get_run(run_id: string) -> RunDetail? {
     });
     let ls = await looks;
     let ps = await performs;
+    let cs = await consults;
     let steps = ds.map((d) -> {
         step_detail(
             d,
@@ -337,6 +357,9 @@ function get_run(run_id: string) -> RunDetail? {
             }),
             ps.find((p) -> {
                 p.step == d.step
+            }),
+            cs.find((c) -> {
+                c.step == d.step
             }),
         )
     });

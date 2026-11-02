@@ -10,6 +10,8 @@ Three APIs, all thin over BAML:
     POST /api/execute                  {"goal": "...", "max_steps": 30, "provider"?: "lmstudio"|"claude", "model"?: "..."}
     GET  /api/execute                  active run, queue, recent local runs
     POST /api/execute/<run_id>/cancel  stop a queued or running goal
+    POST /api/execute/<run_id>/answer  {"answer": "..."} reply to the agent's question (ask_user)
+    POST /api/execute/<run_id>/message {"text": "..."} steer: the agent reads it next turn
 
   Query (`baml query` over the Boundary cloud project in baml.toml):
     GET  /api/query/runs?limit=50      run summaries, newest first
@@ -61,7 +63,8 @@ class Job:
     goal: str
     max_steps: int
     model: dict  # run_task kwargs: provider, model, base_url
-    state: str = "queued"  # queued | running | done | gave_up | out_of_steps | error | cancelled
+    # queued | running | needs_input | done | gave_up | out_of_steps | error | cancelled
+    state: str = "queued"
     queued_at: float = field(default_factory=time.time)
     started_at: float | None = None
     ended_at: float | None = None
@@ -69,10 +72,18 @@ class Job:
     latest_shot: str | None = None
     summary: str | None = None
     error: str | None = None
+    # The agent's open question (ask_user), while state == "needs_input".
+    question: str | None = None
+    options: list[str] = field(default_factory=list)
+    # Steering messages: {text, sent_at, delivered_step} (None until the agent reads it).
+    messages: list[dict] = field(default_factory=list)
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+    answers: queue.Queue = field(default_factory=queue.Queue, repr=False)
+
+    PRIVATE = ("cancel", "answers")
 
     def public(self) -> dict:
-        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "cancel"}
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in self.PRIVATE}
 
 
 class Executor:
@@ -120,6 +131,7 @@ class Executor:
             try:
                 outcome = b.run_task(
                     job.goal, self._look(job), self._act(job),
+                    ask=self._ask(job), inbox=self._inbox(job),
                     max_steps=job.max_steps, run_id=job.run_id, **job.model,
                 )
                 job.state, job.summary = outcome.status, outcome.summary
@@ -143,6 +155,47 @@ class Executor:
             job.latest_shot = path
             return shot
         return look
+
+    def _ask(self, job: Job):
+        """Pause the run on the agent's question until the dashboard answers."""
+        def ask(question: str, options: list[str]) -> str:
+            job.question, job.options, job.state = question, list(options), "needs_input"
+            try:
+                while True:
+                    if job.cancel.is_set():
+                        raise RunCancelled("cancelled from the dashboard")
+                    try:
+                        return job.answers.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
+            finally:
+                job.question, job.options, job.state = None, [], "running"
+        return ask
+
+    def _inbox(self, job: Job):
+        """Steering messages sent since the agent last checked."""
+        def inbox() -> list[str]:
+            with self.lock:
+                fresh = [m for m in job.messages if m["delivered_step"] is None]
+                for m in fresh:
+                    m["delivered_step"] = job.step
+            return [m["text"] for m in fresh]
+        return inbox
+
+    def answer(self, run_id: str, text: str) -> Job | None:
+        job = self.jobs.get(run_id)
+        if not job or job.state != "needs_input":
+            return None
+        job.answers.put(text)
+        return job
+
+    def steer(self, run_id: str, text: str) -> Job | None:
+        job = self.jobs.get(run_id)
+        if not job or job.state not in ("queued", "running", "needs_input"):
+            return None
+        with self.lock:
+            job.messages.append({"text": text, "sent_at": time.time(), "delivered_step": None})
+        return job
 
     def _act(self, job: Job):
         def act(op) -> None:
@@ -262,6 +315,14 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "Claude needs ANTHROPIC_API_KEY set on the server"}, 400)
                 job = EXECUTOR.submit(goal, int(body.get("max_steps") or 30), model)
                 self.send_json(job.public(), 202)
+            case ["api", "execute", run_id, "answer"]:
+                text = (self.body().get("answer") or "").strip()
+                job = EXECUTOR.answer(run_id, text) if text else None
+                self.send_json(job.public() if job else {"error": "nothing to answer (or empty answer)"}, 200 if job else 409)
+            case ["api", "execute", run_id, "message"]:
+                text = (self.body().get("text") or "").strip()
+                job = EXECUTOR.steer(run_id, text) if text else None
+                self.send_json(job.public() if job else {"error": "run isn't active (or empty message)"}, 200 if job else 409)
             case ["api", "execute", run_id, "cancel"]:
                 job = EXECUTOR.cancel(run_id)
                 self.send_json(job.public() if job else {"error": "no such job"}, 200 if job else 404)

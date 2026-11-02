@@ -229,6 +229,20 @@ class Wait {
     }
 }
 
+// Pauses the run until the user answers (dashboard or terminal). The answer
+// is saved to the model's notes.
+class AskUser {
+    action: "ask_user",
+    question: string @description("One short, specific question for the user"),
+    options: string[] @description("2-4 likely answers the user can pick from; empty for an open question"),
+
+    implements baml.ToString {
+        function to_string(self) -> string {
+            `ask user: ${self.question}`
+        }
+    }
+}
+
 class Done {
     action: "done",
     summary: string @description("What was accomplished, and the answer if the goal asked a question"),
@@ -264,7 +278,7 @@ type Move = Click
     | OpenUrl
     | Wait;
 
-type Action = Move | Done | GiveUp;
+type Action = Move | AskUser | Done | GiveUp;
 
 test "actions compile to screen-space ops" {
     let shot = Screenshot { path: "x.png", width: 1280, height: 720, screen_width: 1920, screen_height: 1080 };

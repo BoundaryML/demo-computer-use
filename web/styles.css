@@ -180,3 +180,21 @@ dd { margin: 0; }
 .composer-opts { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
 .model-select { min-width: 0; flex: 1; max-width: 200px; text-overflow: ellipsis; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--ink); font: inherit; font-size: 12px; }
 .model-tag { display: inline-block; margin-top: 4px; font: 10.5px "JetBrains Mono", ui-monospace, monospace; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+
+/* ask_user + steering */
+.pill-needs_input { color: var(--warn); }
+.live.asking { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); }
+.question { margin-top: 12px; padding: 14px; border-radius: 12px; background: color-mix(in srgb, var(--warn) 8%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
+.question h3 { font-size: 17px; margin: 4px 0 10px; }
+.options { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.reply { display: flex; gap: 8px; }
+.reply input { flex: 1; min-width: 0; padding: 8px 12px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); font: inherit; outline: none; }
+.reply input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
+.steer { margin-top: 12px; }
+.steer-log { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 4px; }
+.steer-log li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 10px; border-radius: 8px; background: var(--panel-2); font-size: 13px; }
+.steer-msg { font-size: 13px; margin: 6px 0; padding: 6px 10px; border-radius: 8px; background: color-mix(in srgb, var(--info) 9%, transparent); }
+.qa { margin: 10px 0; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--warn) 8%, transparent); font-size: 14px; }
+.qa p { margin: 2px 0; }
+.ask-alert { color: var(--warn); font-weight: 600; }
+.ask-alert .pulse { color: var(--warn); }

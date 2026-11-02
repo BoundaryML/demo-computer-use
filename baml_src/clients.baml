@@ -16,6 +16,10 @@ const MODEL_ATTEMPTS = 4;
 const MAX_OUTPUT_TOKENS = 4096;
 // Local models on a laptop can take a while per screenshot.
 const LOCAL_TIMEOUT_SECONDS = 300;
+// Past screenshots replayed to the model each turn. Claude caches the
+// trajectory, so it gets the whole run; a 4B local model's context can't.
+const CLAUDE_FRAMES = 30;
+const LOCAL_FRAMES = 2;
 
 type Provider = "lmstudio" | "claude";
 
@@ -31,6 +35,8 @@ class Pilot {
     provider: Provider,
     model: string,
     coords: Coords,
+    // How many past screenshots the model sees (see CLAUDE_FRAMES).
+    frames: int,
     client: ai.Client,
 
     function new(provider: Provider = "lmstudio", model: string? = null, base_url: string? = null) -> Self {
@@ -49,6 +55,7 @@ class Pilot {
                     provider: provider,
                     model: m,
                     coords: coords_for(m),
+                    frames: LOCAL_FRAMES,
                     client: ai.clients.Retry.new(inner = local, max_attempts = MODEL_ATTEMPTS),
                 }
             },
@@ -59,6 +66,7 @@ class Pilot {
                     provider: provider,
                     model: m,
                     coords: "pixels",
+                    frames: CLAUDE_FRAMES,
                     client: ai.clients.Retry.new(inner = claude, max_attempts = MODEL_ATTEMPTS),
                 }
             },

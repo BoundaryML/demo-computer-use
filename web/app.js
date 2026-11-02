@@ -18,7 +18,7 @@ const DETAIL_POLL_LIVE = 2500;
 // Cloud ingestion lags a few seconds: keep polling briefly after a run ends.
 const SETTLE_AFTER_END = 15000;
 
-const LIVE = new Set(["running", "queued"]);
+const LIVE = new Set(["running", "queued", "needs_input"]);
 
 // ---- helpers ----
 
@@ -111,6 +111,7 @@ function actionLabel(a) {
     case "wait": return `wait ${a.seconds}s`;
     case "done": return "done";
     case "give_up": return "give up";
+    case "ask_user": return `ask: “${a.question}”`;
     default: return a.action;
   }
 }
@@ -141,7 +142,7 @@ function opLabel(op) {
 // ---- small components ----
 
 function Status({ status }) {
-  const label = { gave_up: "gave up", out_of_steps: "out of steps" }[status] || status;
+  const label = { gave_up: "gave up", out_of_steps: "out of steps", needs_input: "needs your input" }[status] || status;
   return html`<span className=${`pill pill-${status}`}>${LIVE.has(status) && html`<i className="pulse" />`}${label}</span>`;
 }
 
@@ -331,8 +332,15 @@ function StepCard({ step }) {
           <span>${kfmt(step.input_tokens)} in / ${kfmt(step.output_tokens)} out</span>
           ${step.model_calls > 1 && html`<span className="warn-text">${step.model_calls} model calls</span>`}
         </div>
+        ${step.user_messages.map((m, i) => html`<p key=${`m${i}`} className="steer-msg"><span className="tag">you said</span> ${m}</p>`)}
         ${step.warnings.map((w, i) => html`<p key=${i} className="warn-box">⚠ ${w}</p>`)}
         ${finishing && html`<p className="final">${d.action.summary || d.action.reason}</p>`}
+        ${d.action.action === "ask_user" && html`
+          <div className="qa">
+            <p><strong>Asked:</strong> ${d.action.question}</p>
+            ${d.action.options?.length > 0 && html`<p className="muted small">Options: ${d.action.options.join(" · ")}</p>`}
+            <p><strong>Answer:</strong> ${step.answer ? step.answer.replace(/^You asked the user ".*" and they answered: /, "") : html`<span className="muted">waiting…</span>`}</p>
+          </div>`}
         <${Candidates} step=${step} hover=${hover} setHover=${setHover} />
         <dl>
           <dt>Saw</dt><dd>${d.observation}</dd>
@@ -372,17 +380,95 @@ function Timeline({ steps }) {
 }
 
 // What the local executor knows about this run, ahead of the cloud.
-function LivePanel({ job, cloudSteps, onCancel }) {
+function post(path, body) {
+  return api(path, { method: "POST", body: JSON.stringify(body) });
+}
+
+// The agent asked something (ask_user): the run is paused until this is answered.
+function QuestionCard({ job, onChange }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const send = async (answer) => {
+    if (!answer.trim() || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await post(`/api/execute/${encodeURIComponent(job.run_id)}/answer`, { answer });
+      setText("");
+      onChange();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return html`
+    <div className="question">
+      <span className="eyebrow">The agent is asking</span>
+      <h3>${job.question}</h3>
+      ${job.options?.length > 0 && html`
+        <div className="options">
+          ${job.options.map((o) => html`<button key=${o} className="btn" disabled=${busy} onClick=${() => send(o)}>${o}</button>`)}
+        </div>`}
+      <form className="reply" onSubmit=${(e) => { e.preventDefault(); send(text); }}>
+        <input autoFocus placeholder=${job.options?.length ? "…or type your own answer" : "Type your answer"} value=${text} onInput=${(e) => setText(e.target.value)} />
+        <button className="btn primary" disabled=${busy || !text.trim()}>Answer</button>
+      </form>
+      ${err && html`<p className="error-text small">${err}</p>`}
+    </div>`;
+}
+
+// Send the agent a message mid-run; it reads it at the start of its next turn.
+function SteerBox({ job, onChange }) {
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const send = async (e) => {
+    e.preventDefault();
+    if (!text.trim() || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await post(`/api/execute/${encodeURIComponent(job.run_id)}/message`, { text });
+      setText("");
+      onChange();
+    } catch (e2) {
+      setErr(e2.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const messages = job.messages || [];
+  return html`
+    <div className="steer">
+      ${messages.length > 0 && html`
+        <ul className="steer-log">
+          ${messages.map((m, i) => html`
+            <li key=${i}><span className="steer-text">${m.text}</span>
+              <span className="muted small">${m.delivered_step == null ? "queued: the agent reads it next turn" : `read at step ${m.delivered_step}`}</span></li>`)}
+        </ul>`}
+      <form className="reply" onSubmit=${send}>
+        <input placeholder="Steer the agent, e.g. “use Slack, not Messages” or “the button is at the top right”" value=${text} onInput=${(e) => setText(e.target.value)} />
+        <button className="btn primary" disabled=${busy || !text.trim()}>Send</button>
+      </form>
+      ${err && html`<p className="error-text small">${err}</p>`}
+    </div>`;
+}
+
+// What the local executor knows about this run, ahead of the cloud.
+function LivePanel({ job, cloudSteps, onCancel, onChange }) {
   const [cancelling, setCancelling] = useState(false);
   if (!job) return null;
   const pending = job.state === "queued";
+  const asking = job.state === "needs_input";
   const elapsed = job.started_at ? Date.now() / 1000 - job.started_at : null;
   return html`
-    <section className="card live">
+    <section className=${`card live ${asking ? "asking" : ""}`}>
       <div className="live-head">
         <div>
-          <span className="eyebrow">${pending ? "Queued" : "Live on this Mac"}</span>
-          <h3>${pending ? "Waiting for the screen…" : `Step ${job.step} in progress`}</h3>
+          <span className="eyebrow">${pending ? "Queued" : "Live on this computer"}</span>
+          <h3>${pending ? "Waiting for the screen…" : asking ? `Paused at step ${job.step}: waiting for you` : `Step ${job.step} in progress`}</h3>
           <p className="muted small">
             ${pending ? "Another goal is running." : `${ms(elapsed)} elapsed · ${cloudSteps} step${cloudSteps === 1 ? "" : "s"} recorded so far (traces land a few seconds behind)`}
           </p>
@@ -392,6 +478,8 @@ function LivePanel({ job, cloudSteps, onCancel }) {
           await onCancel(job.run_id).finally(() => setCancelling(false));
         }}>${cancelling ? "Cancelling…" : "Cancel"}</button>
       </div>
+      ${asking && html`<${QuestionCard} job=${job} onChange=${onChange} />`}
+      ${!asking && html`<${SteerBox} job=${job} onChange=${onChange} />`}
       ${job.latest_shot && html`
         <div className="live-shot">
           <img src=${`${shotUrl(job.latest_shot)}?t=${job.step}`} alt="Latest screenshot" />
@@ -399,7 +487,7 @@ function LivePanel({ job, cloudSteps, onCancel }) {
     </section>`;
 }
 
-function RunDetail({ runId, job, onCancel, listEntry }) {
+function RunDetail({ runId, job, onCancel, onChange, listEntry }) {
   const [endedAt, setEndedAt] = useState(null);
   const jobLive = job && LIVE.has(job.state);
   useEffect(() => {
@@ -435,7 +523,7 @@ function RunDetail({ runId, job, onCancel, listEntry }) {
         </div>
       </header>
 
-      ${jobLive && html`<${LivePanel} job=${job} cloudSteps=${steps.length} onCancel=${onCancel} />`}
+      ${jobLive && html`<${LivePanel} job=${job} cloudSteps=${steps.length} onCancel=${onCancel} onChange=${onChange} />`}
 
       ${error && error.status !== 404 && html`<p className="error-text">Query failed: ${error.message}</p>`}
       ${!data && loading && html`<div className="card skeleton">Querying traces…</div>`}
@@ -514,7 +602,9 @@ function App() {
     <div className="app">
       <header className="topbar">
         <a className="brand" href="#/"><span className="logo" />Computer Use<span className="muted"> · BAML agent</span></a>
-        <span className="muted small mono">${anyLocalLive ? html`<i className="pulse" /> agent running` : "idle"}</span>
+        <span className="muted small mono">${exec?.active?.state === "needs_input"
+          ? html`<a className="ask-alert" href=${`#/runs/${encodeURIComponent(exec.active.run_id)}`}><i className="pulse" /> agent needs your input</a>`
+          : anyLocalLive ? html`<i className="pulse" /> agent running` : "idle"}</span>
       </header>
       <div className="layout">
         <aside className="rail">
@@ -523,7 +613,7 @@ function App() {
         </aside>
         <main className="main">
           ${runId
-            ? html`<${RunDetail} key=${runId} runId=${runId} job=${job} onCancel=${onCancel} listEntry=${runs.find((r) => r.run_id === runId)} />`
+            ? html`<${RunDetail} key=${runId} runId=${runId} job=${job} onCancel=${onCancel} onChange=${refreshExec} listEntry=${runs.find((r) => r.run_id === runId)} />`
             : html`<${Welcome} />`}
         </main>
       </div>

@@ -11,8 +11,10 @@ uv run server.py          # http://127.0.0.1:8787, then type a goal
 ```
 Python (agent.py)                 BAML (baml_src/)
 ─────────────────                 ─────────────────────────────────────────────
-look(path) -> Screenshot  ◀──┐    run_task(goal, look, act)
+look(path) -> Screenshot  ◀──┐    run_task(goal, look, act, ask, inbox)
 act(op)                   ◀──┤      loop:
+ask(question) -> answer   ◀──┤        messages = inbox()
+inbox() -> [messages]     ◀──┤
                              ├──────  shot = look(...)
                              │        Decide(goal, notes, history, screenshot) -> Decision
                              │          observation, verdict on the last step,
@@ -23,6 +25,8 @@ act(op)                   ◀──┤      loop:
 - **One loop, in BAML.** Python passes `look` and `act` into `run_task` as callables, both traced with `@trace.instrument`, so a run is one trace tree.
 - **Typed action space** (`agent/actions.baml`): `click`, `double_click`, `type`, `key`, `scroll`, `drag`, `hover`, `open_app`, `open_url`, `wait`, `done`, `give_up`. Each action compiles itself to screen-space ops; Python never does coordinate math.
 - **The decision schema does the reasoning.** The model writes, in order: what it sees, whether its last action worked, the candidate moves with screen positions, facts to `remember`, its plan, the action, and what it expects to see next.
+- **Trajectory as conversation, cached.** Each past step is replayed as a user turn (its screenshot) and an assistant turn (the model's own decision). Earlier turns never change, and a `${cache()}` marker goes before the current turn, so Claude reads the trajectory from Anthropic's prompt cache: each step writes only its new screenshot and decision to the cache. Claude replays up to 30 frames; local models replay 2, and older steps fall back to one-line summaries.
+- **Asking and steering.** The model can `ask_user` when the goal is ambiguous ("message Bob": which app?) or before an irreversible step. The run pauses until you answer, in the dashboard (one-click options or free text) or in the terminal. You can also message a running agent from the dashboard ("use Slack", "the button is top right"). It reads your message at the start of its next turn, treats it as overriding its plan, and keeps it in its notes.
 - **Memory.** Facts the model saves (text to copy, names, numbers) are fed back every turn. Without this, it loses information as soon as it switches apps and ping-pongs between them.
 - **Loop detection.** Warnings when the same action repeats, keeps coming back, keeps failing, or the step budget is nearly spent.
 - **Coordinate spaces.** Claude answers in screenshot pixels. Qwen3-VL answers on a 0–1000 grid. `Pilot.view()` handles both.
@@ -79,6 +83,8 @@ Slam the mouse into a screen corner to abort a run.
 | `POST /api/execute` | `{"goal", "max_steps"?, "provider"?, "model"?}` queues a goal (one at a time: there's one mouse) |
 | `GET /api/execute` | active run, queue, recent local runs |
 | `POST /api/execute/<run_id>/cancel` | cancel |
+| `POST /api/execute/<run_id>/answer` | `{"answer"}` answers the agent's question (`ask_user`) |
+| `POST /api/execute/<run_id>/message` | `{"text"}` steers a running agent; it reads the message next turn |
 | `GET /api/query/runs` | run summaries from `baml query` |
 | `GET /api/query/runs/<run_id>` | one run, step by step |
 | `POST /api/query/sql` | `{"sql": "SELECT ..."}`, read-only |
