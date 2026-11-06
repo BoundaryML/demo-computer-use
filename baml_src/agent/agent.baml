@@ -341,7 +341,7 @@ function consult(
 
 // Told to the model on the turn after the user extends the step budget.
 function more_steps_hint(more: int, total: int) -> string {
-    `The user gave you ${more} more steps (${total} in total), so you are no longer about to run out. The agent dashboard may be in front now because the run paused for them: switch back to the app you were working in and continue the goal.`
+    `The user gave you ${more} more steps (${total} in total), so you are no longer about to run out. The app you were working in has been put back in front. If the screenshot shows the agent dashboard instead, switch back to the app you were working in, then continue the goal.`
 }
 
 // The hint for retrying after a reply that ended early, or null when retrying

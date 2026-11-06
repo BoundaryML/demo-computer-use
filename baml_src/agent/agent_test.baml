@@ -235,5 +235,6 @@ test "the prompt says the dashboard comes back on its own" {
         .build_request(client = claude.client)
         .body
         .to_string();
-    assert.contains(body, "Don't spend steps switching back to it")
+    assert.contains(body, "Don't spend steps switching back to it");
+    assert.contains(body, "the app you were working in is put back in front")
 }

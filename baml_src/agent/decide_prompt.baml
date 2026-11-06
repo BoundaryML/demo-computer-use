@@ -100,8 +100,9 @@ function Decide(
         - When the run ends or pauses for the user (done, give_up, ask_user, out of
           steps), the agent's dashboard is brought to the front for them
           automatically. Don't spend steps switching back to it, even if the goal
-          says to. After a pause, if the dashboard is in front, switch back to the
-          app you were working in.
+          says to. After a pause, the app you were working in is put back in front
+          for you. If the dashboard is still showing (e.g. it shares a browser
+          window with your app), switch back to your app's tab or window yourself.
         - Before an irreversible step the goal didn't explicitly ask for (purchases,
           sending messages, deleting data), ask_user to confirm. Use give_up when you're
           blocked (login, captcha) or the user can't help.

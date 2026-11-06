@@ -222,13 +222,103 @@ def _front_macos(title_prefix: str) -> bool:
     return _osascript(_MAC_FIND_WINDOW, title_prefix)
 
 
-def _front_windows(title_prefix: str) -> bool:
+def front_view():
+    """What's in front right now (window, or browser tab on macOS), so it can be
+    put back with `restore_view` after a pause. None when it can't be told."""
+    try:
+        if PLATFORM == "windows":
+            return _win32()[0].GetForegroundWindow() or None
+        if PLATFORM == "macos":
+            return _front_view_macos()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def restore_view(view) -> bool:
+    """Put back what `front_view` saw: after the user answers in the dashboard,
+    the agent should be looking at its own app again, not the dashboard."""
+    if view is None:
+        return False
+    try:
+        if PLATFORM == "windows":
+            return _focus_hwnd(view)
+        if PLATFORM == "macos":
+            return _restore_view_macos(view)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False
+
+
+_MAC_FRONT_APP = """
+tell application "System Events"
+  set p to first application process whose frontmost is true
+  return (bundle identifier of p) & linefeed & (name of p)
+end tell"""
+_MAC_FRONT_TAB = {
+    "chromium": 'tell application "{app}" to return (id of front window as text) & linefeed & (active tab index of front window as text)',
+    "safari": 'tell application "{app}" to return (id of front window as text) & linefeed & (index of current tab of front window as text)',
+}
+_MAC_RESTORE_TAB = {
+    "chromium": """
+on run argv
+  tell application "{app}"
+    set w to window id ((item 1 of argv) as integer)
+    set active tab index of w to ((item 2 of argv) as integer)
+    set index of w to 1
+    activate
+  end tell
+  return "front"
+end run""",
+    "safari": """
+on run argv
+  tell application "{app}"
+    set w to window id ((item 1 of argv) as integer)
+    set current tab of w to tab ((item 2 of argv) as integer) of w
+    set index of w to 1
+    activate
+  end tell
+  return "front"
+end run""",
+}
+_MAC_ACTIVATE = """
+on run argv
+  tell application id (item 1 of argv) to activate
+  return "front"
+end run"""
+
+
+def _front_view_macos() -> dict | None:
+    r = subprocess.run(["osascript", "-e", _MAC_FRONT_APP], capture_output=True, text=True, timeout=15)
+    bundle_id, _, app = r.stdout.strip().partition("\n")
+    if not bundle_id:
+        return None
+    view = {"bundle_id": bundle_id, "app": app}
+    kind = _MAC_TAB_BROWSERS.get(app)
+    if kind:  # a browser: remember the tab too, since the dashboard may share its window
+        t = subprocess.run(["osascript", "-e", _MAC_FRONT_TAB[kind].replace("{app}", app)],
+                           capture_output=True, text=True, timeout=15)
+        window_id, _, tab = t.stdout.strip().partition("\n")
+        if window_id and tab:
+            view.update(kind=kind, window_id=window_id, tab=tab)
+    return view
+
+
+def _restore_view_macos(view: dict) -> bool:
+    if "kind" in view and _osascript(_MAC_RESTORE_TAB[view["kind"]].replace("{app}", view["app"]),
+                                     view["window_id"], view["tab"]):
+        return True
+    return _osascript(_MAC_ACTIVATE, view["bundle_id"])
+
+
+def _win32():
     import ctypes
     from ctypes import wintypes
 
     user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
     user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.IsWindow.argtypes = [wintypes.HWND]
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     user32.IsIconic.argtypes = [wintypes.HWND]
     user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -238,24 +328,13 @@ def _front_windows(title_prefix: str) -> bool:
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
     user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    return user32, kernel32
 
-    found: list[int] = []
 
-    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    def visit(hwnd, _):
-        if user32.IsWindowVisible(hwnd):
-            n = user32.GetWindowTextLengthW(hwnd)
-            buf = ctypes.create_unicode_buffer(n + 1)
-            user32.GetWindowTextW(hwnd, buf, n + 1)
-            if buf.value.startswith(title_prefix):
-                found.append(hwnd)
-                return False  # stop: windows enumerate top-most first
-        return True
-
-    user32.EnumWindows(visit, 0)
-    if not found:
+def _focus_hwnd(hwnd) -> bool:
+    user32, kernel32 = _win32()
+    if not user32.IsWindow(hwnd):
         return False
-    hwnd = found[0]
     if user32.IsIconic(hwnd):
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
     # Windows lets only the foreground thread hand off focus: borrow its input
@@ -270,6 +349,28 @@ def _front_windows(title_prefix: str) -> bool:
         if attached:
             user32.AttachThreadInput(me, fg_thread, False)
     return user32.GetForegroundWindow() == hwnd
+
+
+def _front_windows(title_prefix: str) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    user32, _ = _win32()
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if buf.value.startswith(title_prefix):
+                found.append(hwnd)
+                return False  # stop: windows enumerate top-most first
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return bool(found) and _focus_hwnd(found[0])
 
 
 def extend_in_terminal(used: int) -> int:

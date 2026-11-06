@@ -65,6 +65,7 @@ DASHBOARD_TITLE = "Computer Use"
 DASHBOARD_URL = "http://127.0.0.1:8787"  # set from --host/--port in main()
 # A run out of steps waits this long for "continue" before it stops.
 EXTEND_WAIT_SECONDS = 30 * 60
+RESTORE_SETTLE_SECONDS = 0.5
 # Bring the user back to the dashboard when a run reaches one of these.
 SUMMON_STATES = ("done", "gave_up", "out_of_steps", "error", "needs_input", "needs_steps")
 
@@ -184,15 +185,17 @@ class Executor:
         """Pause the run on the agent's question until the dashboard answers."""
         def ask(question: str, options: list[str]) -> str:
             job.question, job.options, job.state = question, list(options), "needs_input"
-            summon(job)
+            view = summon(job)
             try:
                 while True:
                     if job.cancel.is_set():
                         raise RunCancelled("cancelled from the dashboard")
                     try:
-                        return job.answers.get(timeout=0.5)
+                        answer = job.answers.get(timeout=0.5)
                     except queue.Empty:
                         continue
+                    restore(view)
+                    return answer
             finally:
                 job.question, job.options, job.state = None, [], "running"
         return ask
@@ -201,7 +204,7 @@ class Executor:
         """Out of steps: pause until the dashboard grants more (or stops the run)."""
         def extend(used: int) -> int:
             job.state = "needs_steps"
-            summon(job)
+            view = summon(job)
             deadline = time.time() + EXTEND_WAIT_SECONDS
             try:
                 while time.time() < deadline:
@@ -211,6 +214,8 @@ class Executor:
                         more = max(0, int(job.extensions.get(timeout=0.5)))
                     except queue.Empty:
                         continue
+                    if more:  # carrying on: back to the app (0 ends the run, which summons again)
+                        restore(view)
                     job.max_steps += more
                     return more
                 return 0  # nobody answered: stop as out_of_steps
@@ -258,15 +263,28 @@ class Executor:
         return act
 
 
-def summon(job: Job) -> None:
+def summon(job: Job):
     """Bring the user back to the dashboard when a run ends or needs them:
-    focus the browser window showing it, or open the run page if there's none."""
+    focus the browser tab showing it, or open the run page if there's none.
+    Returns what was in front before, for `restore` once the user answers."""
     if job.state not in SUMMON_STATES:
-        return
+        return None
+    view = None
     try:
+        view = agent.front_view()
         if not agent.bring_to_front(DASHBOARD_TITLE):
             webbrowser.open(f"{DASHBOARD_URL}/#/runs/{job.run_id}")
     except Exception:  # never let focusing a window break a run
+        traceback.print_exc()
+    return view
+
+
+def restore(view) -> None:
+    """After a pause, put the agent's app back in front before its next screenshot."""
+    try:
+        if agent.restore_view(view):
+            time.sleep(RESTORE_SETTLE_SECONDS)  # let the window finish drawing
+    except Exception:
         traceback.print_exc()
 
 
