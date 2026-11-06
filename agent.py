@@ -132,6 +132,152 @@ def act(op) -> None:
             raise ValueError(f"unknown op {other}")
 
 
+def bring_to_front(title_prefix: str) -> bool:
+    """Bring the browser tab or window whose title starts with `title_prefix`
+    (the dashboard) to the front. Returns False when nothing matched or focus
+    couldn't be moved, so the caller can open the page instead."""
+    try:
+        if PLATFORM == "windows":
+            return _front_windows(title_prefix)
+        if PLATFORM == "macos":
+            return _front_macos(title_prefix)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False
+
+
+# macOS: browsers that expose their tabs to AppleScript, by process name. These
+# can switch to the dashboard tab even when it isn't the active one.
+_MAC_TAB_BROWSERS = {
+    "Google Chrome": "chromium", "Arc": "chromium", "Brave Browser": "chromium",
+    "Microsoft Edge": "chromium", "Safari": "safari",
+}
+_MAC_FIND_TAB = {
+    "chromium": """
+on run argv
+  tell application "{app}"
+    repeat with w in windows
+      set i to 0
+      repeat with t in tabs of w
+        set i to i + 1
+        if title of t starts with (item 1 of argv) then
+          set active tab index of w to i
+          set index of w to 1
+          activate
+          return "front"
+        end if
+      end repeat
+    end repeat
+  end tell
+end run""",
+    "safari": """
+on run argv
+  tell application "{app}"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if name of t starts with (item 1 of argv) then
+          set current tab of w to t
+          set index of w to 1
+          activate
+          return "front"
+        end if
+      end repeat
+    end repeat
+  end tell
+end run""",
+}
+# Any other app (e.g. Firefox): match window titles through System Events. That
+# only sees each window's active tab, and needs the Accessibility permission the
+# agent already has.
+_MAC_FIND_WINDOW = """
+on run argv
+  tell application "System Events"
+    repeat with p in (processes whose background only is false)
+      try
+        repeat with w in windows of p
+          if name of w starts with (item 1 of argv) then
+            perform action "AXRaise" of w
+            set frontmost of p to true
+            return "front"
+          end if
+        end repeat
+      end try
+    end repeat
+  end tell
+end run"""
+
+
+def _osascript(script: str, *args: str) -> bool:
+    # Arguments go in as argv, never spliced into the script.
+    r = subprocess.run(["osascript", "-e", script, *args], capture_output=True, text=True, timeout=15)
+    return r.stdout.strip() == "front"
+
+
+def _front_macos(title_prefix: str) -> bool:
+    for app, kind in _MAC_TAB_BROWSERS.items():
+        # Only ask running browsers: telling an app that isn't running launches it.
+        running = subprocess.run(["pgrep", "-x", app], capture_output=True).returncode == 0
+        if running and _osascript(_MAC_FIND_TAB[kind].replace("{app}", app), title_prefix):
+            return True
+    return _osascript(_MAC_FIND_WINDOW, title_prefix)
+
+
+def _front_windows(title_prefix: str) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsIconic.argtypes = [wintypes.HWND]
+    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.BringWindowToTop.argtypes = [wintypes.HWND]
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+
+    found: list[int] = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _):
+        if user32.IsWindowVisible(hwnd):
+            n = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if buf.value.startswith(title_prefix):
+                found.append(hwnd)
+                return False  # stop: windows enumerate top-most first
+        return True
+
+    user32.EnumWindows(visit, 0)
+    if not found:
+        return False
+    hwnd = found[0]
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    # Windows lets only the foreground thread hand off focus: borrow its input
+    # queue for the switch, then give it back.
+    fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+    me = kernel32.GetCurrentThreadId()
+    attached = fg_thread and fg_thread != me and user32.AttachThreadInput(me, fg_thread, True)
+    try:
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            user32.AttachThreadInput(me, fg_thread, False)
+    return user32.GetForegroundWindow() == hwnd
+
+
+def extend_in_terminal(used: int) -> int:
+    """Out of steps on the CLI: ask how many more to allow (0 or Enter stops)."""
+    answer = input(f"\nOut of steps after {used}. How many more? (Enter to stop) > ").strip()
+    return int(answer) if answer.isdigit() else 0
+
+
 def ask_in_terminal(question: str, options: list[str]) -> str:
     """ask_user from the CLI: pick a numbered option or type an answer."""
     print(f"\n? {question}")
@@ -145,8 +291,8 @@ def ask_in_terminal(question: str, options: list[str]) -> str:
 
 def add_model_flags(p: argparse.ArgumentParser) -> None:
     p.add_argument("--provider", choices=["lmstudio", "claude"], default="lmstudio",
-                   help="lmstudio (default): a local open-source VLM; claude: Claude Sonnet")
-    p.add_argument("--model", help="model id, e.g. qwen3-vl-4b-instruct (default) or claude-sonnet-5-5")
+                   help="lmstudio (default): a local open-source VLM; claude: Claude Sonnet (or --model for Opus)")
+    p.add_argument("--model", help="model id, e.g. qwen3-vl-4b-instruct (default), claude-sonnet-5-5 or claude-opus-5-5")
     p.add_argument("--base-url", help="LM Studio server URL (default http://127.0.0.1:1235/v1)")
 
 
@@ -168,7 +314,8 @@ def main() -> int:
 
     try:
         outcome = b.run_task(
-            args.goal, look, act, ask=ask_in_terminal, max_steps=args.max_steps, **model_kwargs(args)
+            args.goal, look, act, ask=ask_in_terminal, extend=extend_in_terminal,
+            max_steps=args.max_steps, **model_kwargs(args)
         )
     except pyautogui.FailSafeException:
         print("aborted: mouse moved to a screen corner")

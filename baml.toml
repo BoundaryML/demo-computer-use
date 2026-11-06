@@ -17,3 +17,6 @@ project = "boundary/codeturtle"
 output_type = "python/pydantic"
 output_dir = "."
 naming_convention = "preserve-case"
+
+[toolchain]
+version = "0.23.1-nightly.20261030.a"

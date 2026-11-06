@@ -97,6 +97,11 @@ function Decide(
         - Content below the fold needs a scroll; scroll with the pointer over that pane.
         - Only call done once the screenshot shows the goal is reached. If the goal
           asks a question, put the answer in the summary.
+        - When the run ends or pauses for the user (done, give_up, ask_user, out of
+          steps), the agent's dashboard is brought to the front for them
+          automatically. Don't spend steps switching back to it, even if the goal
+          says to. After a pause, if the dashboard is in front, switch back to the
+          app you were working in.
         - Before an irreversible step the goal didn't explicitly ask for (purchases,
           sending messages, deleting data), ask_user to confirm. Use give_up when you're
           blocked (login, captcha) or the user can't help.

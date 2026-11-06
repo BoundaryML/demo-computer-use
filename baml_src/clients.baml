@@ -11,6 +11,8 @@ const LMSTUDIO_URL = "http://127.0.0.1:1235/v1";
 // Qwen3-VL 4B Instruct: the strongest ~4B open VLM at finding UI elements.
 const LMSTUDIO_MODEL = "qwen3-vl-4b-instruct";
 const CLAUDE_MODEL = "claude-sonnet-5-5";
+// Slower and pricier than Sonnet, but steadier on long, fiddly runs.
+const CLAUDE_OPUS_MODEL = "claude-opus-5-5";
 // Retries cover transient network and 5xx failures; one blip shouldn't end a run.
 const MODEL_ATTEMPTS = 4;
 const MAX_OUTPUT_TOKENS = 4096;

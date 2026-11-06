@@ -6,6 +6,7 @@
 //   act(op)                           perform one screen-space op
 //   ask(question, options) -> answer  optional: ask the human (dashboard/terminal)
 //   inbox() -> messages               optional: steering messages sent since last turn
+//   extend(used) -> more              optional: out of steps; how many more to allow (0 stops)
 //
 // Everything else happens here: deciding, history, loop detection, and
 // compiling actions to ops. One run is one call, so the trace is one tree:
@@ -22,7 +23,10 @@ const MAX_NOTES = 20;
 // Consecutive replies that don't fit the schema before the run gives up.
 const MAX_BAD_REPLIES = 3;
 const BAD_REPLY_HINT = "Your last reply didn't match the required JSON. Use only the listed values: verdict is one of succeeded, failed, unclear, first_step; action.action is one of click, double_click, type, key, scroll, drag, hover, open_app, open_url, wait, ask_user, done, give_up.";
-const NO_ONE_TO_ASK = "No one is available to answer questions in this run. Decide with your best judgment, or give_up if you can't.";
+// A reply cut off by the output limit: seen when the model drifts into
+// tool-call markup and keeps inventing results of its own actions.
+const CUT_OFF_HINT = "Your last reply was cut off at the output limit: it kept going after the decision (tool-call markup, invented results of actions). You decide only this one step and see its result in the next screenshot. Reply with exactly one JSON object and nothing after it.";
+const NO_ONE_TO_ASK ="No one is available to answer questions in this run. Decide with your best judgment, or give_up if you can't.";
 // Lets the UI settle after acting, before the next screenshot.
 const SETTLE_SECONDS = 0.8;
 // Host exception classes that stop the run instead of being reported to the
@@ -213,6 +217,7 @@ function run_task(
     platform: Platform = "macos",
     ask: ((question: string, options: string[]) -> string throws baml.errors.HostCallable)? = null,
     inbox: (() -> string[] throws baml.errors.HostCallable)? = null,
+    extend: ((used: int) -> int throws baml.errors.HostCallable)? = null,
 ) -> Outcome {
     let id = run_id ?? new_run_id();
     let pilot = Pilot.new(provider = provider, model = model, base_url = base_url);
@@ -234,6 +239,7 @@ function run_task(
         act,
         ask,
         inbox,
+        extend,
         $trace = trace.span(inputs = false).context(metadata = { "run_id": id, "goal": goal, "model": pilot.label(), "platform": platform }),
     )
 }
@@ -250,11 +256,21 @@ function run_loop(
     act: (op: Op) -> void throws baml.errors.HostCallable,
     ask: ((question: string, options: string[]) -> string throws baml.errors.HostCallable)?,
     inbox: (() -> string[] throws baml.errors.HostCallable)?,
+    extend: ((used: int) -> int throws baml.errors.HostCallable)?,
 ) -> Outcome {
     let last_error: string? = null;
     let hint: string? = null;
     let bad_replies = 0;
     while (true) {
+        //# Out of steps: ask the human for more before giving up. This happens
+        //# before the screenshot, which may change while they decide.
+        if (extend && run.steps.length() >= run.max_steps) {
+            let more = extend(run.steps.length(), $trace = trace.span(inputs = true, output = true));
+            if (more > 0) {
+                run.max_steps += more;
+                hint = more_steps_hint(more, run.max_steps);
+            }
+        }
         let index = run.steps.length() + 1;
         //# Look
         let shot = look(`${run.dir}/step-${index}.png`, $trace = trace.context(metadata = { "step": index }));
@@ -277,6 +293,16 @@ function run_loop(
                     throw p
                 }
                 hint = BAD_REPLY_HINT;
+                continue;
+            }
+            //# A reply that ended early (output limit) gets the same retry
+            let f: ai.errors.FinishReasonError => {
+                bad_replies += 1;
+                let retry = finish_hint(f.finish_reason);
+                if (!retry || bad_replies >= MAX_BAD_REPLIES) {
+                    throw f
+                }
+                hint = retry;
                 continue;
             }
         };
@@ -313,6 +339,20 @@ function consult(
     `You asked the user "${q.question}" and they answered: ${said}`
 }
 
+// Told to the model on the turn after the user extends the step budget.
+function more_steps_hint(more: int, total: int) -> string {
+    `The user gave you ${more} more steps (${total} in total), so you are no longer about to run out. The agent dashboard may be in front now because the run paused for them: switch back to the app you were working in and continue the goal.`
+}
+
+// The hint for retrying after a reply that ended early, or null when retrying
+// won't help (a refusal or a provider failure ends the run as before).
+function finish_hint(reason: ai.content.StopReason) -> string? {
+    if (reason == ai.content.StopReason.MaxTokens) {
+        return CUT_OFF_HINT;
+    }
+    null
+}
+
 function feedback_text(error: string?) -> string {
     if (error) {
         return `Result of your previous action: it failed to execute: ${error}`;
@@ -330,7 +370,8 @@ function turn(
     //# Out of budget: stop before spending another model call
     if (run.steps.length() >= run.max_steps) {
         run.close_last("unclear", last_error);
-        return outcome(run, "out_of_steps", `Stopped after ${run.max_steps} steps without finishing.`);
+        let noun = if (run.max_steps == 1) { "step" } else { "steps" };
+        return outcome(run, "out_of_steps", `Stopped after ${run.max_steps} ${noun} without finishing.`);
     }
     //# Look at the screen and decide, with the trajectory so far
     let index = run.steps.length() + 1;
