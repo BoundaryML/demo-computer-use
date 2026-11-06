@@ -182,7 +182,7 @@ dd { margin: 0; }
 .model-tag { display: inline-block; margin-top: 4px; font: 10.5px "JetBrains Mono", ui-monospace, monospace; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
 
 /* ask_user + steering */
-.pill-needs_input { color: var(--warn); }
+.pill-needs_input, .pill-needs_steps { color: var(--warn); }
 .live.asking { border-color: color-mix(in srgb, var(--warn) 60%, var(--line)); }
 .question { margin-top: 12px; padding: 14px; border-radius: 12px; background: color-mix(in srgb, var(--warn) 8%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
 .question h3 { font-size: 17px; margin: 4px 0 10px; }

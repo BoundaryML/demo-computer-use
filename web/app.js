@@ -18,9 +18,20 @@ const DETAIL_POLL_LIVE = 2500;
 // Cloud ingestion lags a few seconds: keep polling briefly after a run ends.
 const SETTLE_AFTER_END = 15000;
 
-const LIVE = new Set(["running", "queued", "needs_input"]);
+// needs_steps: out of steps, paused until the user adds more or stops it.
+const LIVE = new Set(["running", "queued", "needs_input", "needs_steps"]);
+// Quick picks when a run runs out of steps.
+const MORE_STEPS = [10, 20, 30];
 
 // ---- helpers ----
+
+// Per-browser conveniences (last model, step budget). Storage can be blocked.
+function remembered(key) {
+  try { return localStorage.getItem(`cu.${key}`); } catch { return null; }
+}
+function remember(key, value) {
+  try { localStorage.setItem(`cu.${key}`, value); } catch { /* not persisted */ }
+}
 
 async function api(path, opts = {}) {
   const res = await fetch(path, {
@@ -142,7 +153,7 @@ function opLabel(op) {
 // ---- small components ----
 
 function Status({ status }) {
-  const label = { gave_up: "gave up", out_of_steps: "out of steps", needs_input: "needs your input" }[status] || status;
+  const label = { gave_up: "gave up", out_of_steps: "out of steps", needs_input: "needs your input", needs_steps: "needs more steps" }[status] || status;
   return html`<span className=${`pill pill-${status}`}>${LIVE.has(status) && html`<i className="pulse" />`}${label}</span>`;
 }
 
@@ -154,9 +165,12 @@ function Kpi({ label, value, hint }) {
 
 function Composer({ onSubmitted }) {
   const [goal, setGoal] = useState("");
-  const [maxSteps, setMaxSteps] = useState(20);
+  const [maxSteps, setMaxSteps] = useState(() => Number(remembered("steps")) || 20);
   // "provider|model"; empty until the model list loads.
   const [choice, setChoice] = useState("");
+  // Keep the last model and step budget across reloads.
+  useEffect(() => { if (choice) remember("model", choice); }, [choice]);
+  useEffect(() => { if (maxSteps) remember("steps", String(maxSteps)); }, [maxSteps]);
   const [models, setModels] = useState(null);
   useEffect(() => {
     let alive = true;
@@ -166,6 +180,8 @@ function Composer({ onSubmitted }) {
       setChoice((cur) => {
         const keys = m.options.map((o) => `${o.provider}|${o.model}`);
         if (keys.includes(cur)) return cur;
+        const last = remembered("model");
+        if (last && keys.includes(last)) return last;
         const d = m.default || {};
         const preferred = m.options.find((o) => o.provider === d.provider && (!d.model || o.model === d.model));
         return preferred ? `${preferred.provider}|${preferred.model}` : keys[0] || "";
@@ -419,6 +435,43 @@ function QuestionCard({ job, onChange }) {
     </div>`;
 }
 
+// Out of steps: the run is paused until it gets more steps or is stopped.
+function MoreStepsCard({ job, onChange }) {
+  const [custom, setCustom] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const send = async (steps) => {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await post(`/api/execute/${encodeURIComponent(job.run_id)}/extend`, { steps });
+      setCustom("");
+      onChange();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const n = parseInt(custom, 10);
+  return html`
+    <div className="question">
+      <span className="eyebrow">Out of steps</span>
+      <h3>Used all ${job.max_steps} step${job.max_steps === 1 ? "" : "s"} without finishing. Keep going?</h3>
+      <p className="muted small">It continues from where it is, with everything it has seen so far. You can also steer it below before it resumes.</p>
+      <div className="options">
+        ${MORE_STEPS.map((k) => html`<button key=${k} className="btn primary" disabled=${busy} onClick=${() => send(k)}>+${k} steps</button>`)}
+        <button className="btn" disabled=${busy} onClick=${() => send(0)}>Stop here</button>
+      </div>
+      <form className="reply" onSubmit=${(e) => { e.preventDefault(); if (n > 0) send(n); }}>
+        <input type="number" min="1" max="500" placeholder="…or another number of steps" value=${custom} onInput=${(e) => setCustom(e.target.value)} />
+        <button className="btn primary" disabled=${busy || !(n > 0)}>Continue</button>
+      </form>
+      ${err && html`<p className="error-text small">${err}</p>`}
+    </div>`;
+}
+
 // Send the agent a message mid-run; it reads it at the start of its next turn.
 function SteerBox({ job, onChange }) {
   const [text, setText] = useState("");
@@ -462,13 +515,15 @@ function LivePanel({ job, cloudSteps, onCancel, onChange }) {
   if (!job) return null;
   const pending = job.state === "queued";
   const asking = job.state === "needs_input";
+  const extending = job.state === "needs_steps";
+  const paused = asking || extending;
   const elapsed = job.started_at ? Date.now() / 1000 - job.started_at : null;
   return html`
-    <section className=${`card live ${asking ? "asking" : ""}`}>
+    <section className=${`card live ${paused ? "asking" : ""}`}>
       <div className="live-head">
         <div>
           <span className="eyebrow">${pending ? "Queued" : "Live on this computer"}</span>
-          <h3>${pending ? "Waiting for the screen…" : asking ? `Paused at step ${job.step}: waiting for you` : `Step ${job.step} in progress`}</h3>
+          <h3>${pending ? "Waiting for the screen…" : extending ? `Paused after step ${job.step}: out of steps` : asking ? `Paused at step ${job.step}: waiting for you` : `Step ${job.step} of ${job.max_steps} in progress`}</h3>
           <p className="muted small">
             ${pending ? "Another goal is running." : `${ms(elapsed)} elapsed · ${cloudSteps} step${cloudSteps === 1 ? "" : "s"} recorded so far (traces land a few seconds behind)`}
           </p>
@@ -479,6 +534,7 @@ function LivePanel({ job, cloudSteps, onCancel, onChange }) {
         }}>${cancelling ? "Cancelling…" : "Cancel"}</button>
       </div>
       ${asking && html`<${QuestionCard} job=${job} onChange=${onChange} />`}
+      ${extending && html`<${MoreStepsCard} job=${job} onChange=${onChange} />`}
       ${!asking && html`<${SteerBox} job=${job} onChange=${onChange} />`}
       ${job.latest_shot && html`
         <div className="live-shot">
@@ -602,8 +658,8 @@ function App() {
     <div className="app">
       <header className="topbar">
         <a className="brand" href="#/"><span className="logo" />Computer Use<span className="muted"> · BAML agent</span></a>
-        <span className="muted small mono">${exec?.active?.state === "needs_input"
-          ? html`<a className="ask-alert" href=${`#/runs/${encodeURIComponent(exec.active.run_id)}`}><i className="pulse" /> agent needs your input</a>`
+        <span className="muted small mono">${["needs_input", "needs_steps"].includes(exec?.active?.state)
+          ? html`<a className="ask-alert" href=${`#/runs/${encodeURIComponent(exec.active.run_id)}`}><i className="pulse" /> ${exec.active.state === "needs_steps" ? "agent is out of steps" : "agent needs your input"}</a>`
           : anyLocalLive ? html`<i className="pulse" /> agent running` : "idle"}</span>
       </header>
       <div className="layout">

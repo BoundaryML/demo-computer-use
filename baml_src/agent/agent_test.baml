@@ -205,3 +205,36 @@ test "remembered facts persist, dedupe, and ignore blanks" {
     run.remember(["joke: Why don't scientists trust atoms?", "contact: Chunying Su"]);
     assert.equal(run.notes, ["joke: Why don't scientists trust atoms?", "contact: Chunying Su"])
 }
+
+test "a reply cut off at the output limit is retried with a hint; refusals are not" {
+    assert.equal(finish_hint(ai.content.StopReason.MaxTokens), CUT_OFF_HINT);
+    assert.is_true(finish_hint(ai.content.StopReason.Refused) == null);
+    assert.is_true(finish_hint(ai.content.StopReason.Failed) == null)
+}
+
+test "the cut-off hint reaches the model on the retry" {
+    let claude = Pilot.new(provider = "claude");
+    let shot = image.from_base64("aaa", "image/png");
+    let body = Decide@spec("g", "", [], [], [], [CUT_OFF_HINT], "", shot, 1, 1280, 720, "pixels", "windows")
+        .build_request(client = claude.client)
+        .body
+        .to_string();
+    assert.contains(body, "Reply with exactly one JSON object and nothing after it.")
+}
+
+test "an extended step budget tells the model it has more steps and where to go back to" {
+    let h = more_steps_hint(10, 30);
+    assert.contains(h, "10 more steps (30 in total)");
+    assert.contains(h, "switch back to the app you were working in")
+}
+
+test "the prompt says the dashboard comes back on its own" {
+    let claude = Pilot.new(provider = "claude");
+    let shot = image.from_base64("aaa", "image/png");
+    let body = Decide@spec("g", "", [], [], [], [], "", shot, 1, 1280, 720, "pixels", "windows")
+        .build_request(client = claude.client)
+        .body
+        .to_string();
+    assert.contains(body, "Don't spend steps switching back to it");
+    assert.contains(body, "the app you were working in is put back in front")
+}

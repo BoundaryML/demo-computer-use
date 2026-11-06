@@ -63,7 +63,10 @@ function available_models(base_url: string? = null) -> ModelChoices {
         _ => null
     };
     let claude: ModelOption[] = if (key) {
-        [ModelOption { provider: "claude", model: CLAUDE_MODEL, label: "Claude Sonnet", loaded: true }]
+        [
+            ModelOption { provider: "claude", model: CLAUDE_MODEL, label: "Claude Sonnet", loaded: true },
+            ModelOption { provider: "claude", model: CLAUDE_OPUS_MODEL, label: "Claude Opus", loaded: true },
+        ]
     } else {
         []
     };

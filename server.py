@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 import traceback
+import webbrowser
 from dataclasses import dataclass, field, fields
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,11 +42,32 @@ from urllib.parse import parse_qs, urlparse
 
 import baml_sdk as b
 import agent
+from baml_bridge import set_unhandled_spawn_error_handler
+
+
+# A failed `spawn { ... }` that nothing awaited (e.g. the second query in
+# list_runs when Boundary is briefly unreachable) ends the process by default.
+# A server should log it and keep serving instead.
+def _report_spawn_error(error: BaseException, cancelled: bool) -> None:
+    if not cancelled:
+        print("unobserved BAML spawn error (server keeps running):", file=sys.stderr)
+        traceback.print_exception(error)
+
+
+set_unhandled_spawn_error_handler(_report_spawn_error)
 
 ROOT = Path(__file__).parent
 WEB = ROOT / "web"
 RUNS = ROOT / "runs"
 RECENT_LIMIT = 20
+# The dashboard's <title>: the browser window showing it starts with this.
+DASHBOARD_TITLE = "Computer Use"
+DASHBOARD_URL = "http://127.0.0.1:8787"  # set from --host/--port in main()
+# A run out of steps waits this long for "continue" before it stops.
+EXTEND_WAIT_SECONDS = 30 * 60
+RESTORE_SETTLE_SECONDS = 0.5
+# Bring the user back to the dashboard when a run reaches one of these.
+SUMMON_STATES = ("done", "gave_up", "out_of_steps", "error", "needs_input", "needs_steps")
 
 # The browser closed the connection before we answered: it reloaded, switched
 # runs, or a poll was superseded while a slow `baml query` ran. Harmless.
@@ -63,7 +85,7 @@ class Job:
     goal: str
     max_steps: int
     model: dict  # run_task kwargs: provider, model, base_url
-    # queued | running | needs_input | done | gave_up | out_of_steps | error | cancelled
+    # queued | running | needs_input | needs_steps | done | gave_up | out_of_steps | error | cancelled
     state: str = "queued"
     queued_at: float = field(default_factory=time.time)
     started_at: float | None = None
@@ -79,8 +101,10 @@ class Job:
     messages: list[dict] = field(default_factory=list)
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     answers: queue.Queue = field(default_factory=queue.Queue, repr=False)
+    # Extra steps granted while state == "needs_steps" (0 = stop).
+    extensions: queue.Queue = field(default_factory=queue.Queue, repr=False)
 
-    PRIVATE = ("cancel", "answers")
+    PRIVATE = ("cancel", "answers", "extensions")
 
     def public(self) -> dict:
         return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in self.PRIVATE}
@@ -131,7 +155,7 @@ class Executor:
             try:
                 outcome = b.run_task(
                     job.goal, self._look(job), self._act(job),
-                    ask=self._ask(job), inbox=self._inbox(job),
+                    ask=self._ask(job), inbox=self._inbox(job), extend=self._extend(job),
                     max_steps=job.max_steps, run_id=job.run_id, **job.model,
                 )
                 job.state, job.summary = outcome.status, outcome.summary
@@ -144,6 +168,7 @@ class Executor:
                 job.ended_at = time.time()
                 with self.lock:
                     self.active = None
+                summon(job)
 
     # look/act wrap the traced host functions with cancel checks and progress.
     def _look(self, job: Job):
@@ -160,17 +185,50 @@ class Executor:
         """Pause the run on the agent's question until the dashboard answers."""
         def ask(question: str, options: list[str]) -> str:
             job.question, job.options, job.state = question, list(options), "needs_input"
+            view = summon(job)
             try:
                 while True:
                     if job.cancel.is_set():
                         raise RunCancelled("cancelled from the dashboard")
                     try:
-                        return job.answers.get(timeout=0.5)
+                        answer = job.answers.get(timeout=0.5)
                     except queue.Empty:
                         continue
+                    restore(view)
+                    return answer
             finally:
                 job.question, job.options, job.state = None, [], "running"
         return ask
+
+    def _extend(self, job: Job):
+        """Out of steps: pause until the dashboard grants more (or stops the run)."""
+        def extend(used: int) -> int:
+            job.state = "needs_steps"
+            view = summon(job)
+            deadline = time.time() + EXTEND_WAIT_SECONDS
+            try:
+                while time.time() < deadline:
+                    if job.cancel.is_set():
+                        raise RunCancelled("cancelled from the dashboard")
+                    try:
+                        more = max(0, int(job.extensions.get(timeout=0.5)))
+                    except queue.Empty:
+                        continue
+                    if more:  # carrying on: back to the app (0 ends the run, which summons again)
+                        restore(view)
+                    job.max_steps += more
+                    return more
+                return 0  # nobody answered: stop as out_of_steps
+            finally:
+                job.state = "running"
+        return extend
+
+    def extend(self, run_id: str, steps: int) -> Job | None:
+        job = self.jobs.get(run_id)
+        if not job or job.state != "needs_steps":
+            return None
+        job.extensions.put(steps)
+        return job
 
     def _inbox(self, job: Job):
         """Steering messages sent since the agent last checked."""
@@ -191,7 +249,7 @@ class Executor:
 
     def steer(self, run_id: str, text: str) -> Job | None:
         job = self.jobs.get(run_id)
-        if not job or job.state not in ("queued", "running", "needs_input"):
+        if not job or job.state not in ("queued", "running", "needs_input", "needs_steps"):
             return None
         with self.lock:
             job.messages.append({"text": text, "sent_at": time.time(), "delivered_step": None})
@@ -203,6 +261,31 @@ class Executor:
                 raise RunCancelled("cancelled from the dashboard")
             agent.act(op)
         return act
+
+
+def summon(job: Job):
+    """Bring the user back to the dashboard when a run ends or needs them:
+    focus the browser tab showing it, or open the run page if there's none.
+    Returns what was in front before, for `restore` once the user answers."""
+    if job.state not in SUMMON_STATES:
+        return None
+    view = None
+    try:
+        view = agent.front_view()
+        if not agent.bring_to_front(DASHBOARD_TITLE):
+            webbrowser.open(f"{DASHBOARD_URL}/#/runs/{job.run_id}")
+    except Exception:  # never let focusing a window break a run
+        traceback.print_exc()
+    return view
+
+
+def restore(view) -> None:
+    """After a pause, put the agent's app back in front before its next screenshot."""
+    try:
+        if agent.restore_view(view):
+            time.sleep(RESTORE_SETTLE_SECONDS)  # let the window finish drawing
+    except Exception:
+        traceback.print_exc()
 
 
 EXECUTOR = Executor()
@@ -319,6 +402,15 @@ class Handler(BaseHTTPRequestHandler):
                 text = (self.body().get("answer") or "").strip()
                 job = EXECUTOR.answer(run_id, text) if text else None
                 self.send_json(job.public() if job else {"error": "nothing to answer (or empty answer)"}, 200 if job else 409)
+            case ["api", "execute", run_id, "extend"]:
+                try:
+                    steps = int(self.body().get("steps", 0))
+                except (TypeError, ValueError):
+                    return self.send_json({"error": "steps must be a whole number"}, 400)
+                if not 0 <= steps <= 500:
+                    return self.send_json({"error": "steps must be between 0 and 500"}, 400)
+                job = EXECUTOR.extend(run_id, steps)
+                self.send_json(job.public() if job else {"error": "run isn't waiting for more steps"}, 200 if job else 409)
             case ["api", "execute", run_id, "message"]:
                 text = (self.body().get("text") or "").strip()
                 job = EXECUTOR.steer(run_id, text) if text else None
@@ -351,6 +443,8 @@ def main() -> None:
     a = p.parse_args()
     DEFAULT_MODEL.clear()
     DEFAULT_MODEL.update(agent.model_kwargs(a))
+    global DASHBOARD_URL
+    DASHBOARD_URL = f"http://{a.host}:{a.port}"
     RUNS.mkdir(exist_ok=True)
     print(f"computer-use: http://{a.host}:{a.port}  (default model: {DEFAULT_MODEL})")
     if agent.TRACE_MODE == "local":
